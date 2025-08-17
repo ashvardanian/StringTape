@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    branches: ["main"]
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  versioning:
+    name: Update Version
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run TinySemVer
+        uses: ashvardanian/tinysemver@v2.1.1
+        with:
+          verbose: "true"
+          version-file: "VERSION"
+          update-version-in: |
+            Cargo.toml:^version = "(\d+\.\d+\.\d+)"
+            Cargo.lock:name = "stringtape"\nversion = "(\d+\.\d+\.\d+)"
+          dry-run: "false"
+          push: "true"
+          create-release: "true"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Test `std`
+        run: cargo test
+      - name: Test `no_std`
+        run: cargo test --no-default-features
+      - name: Test docs
+        run: cargo test --doc
+
+  publish_rust:
+    name: Publish to crates.io
+    runs-on: ubuntu-24.04
+    needs: [versioning, test]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: "main"
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Publish to crates.io
+        uses: katyo/publish-crates@v2
+        with:
+          registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          dry-run: false
