@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "A tape class for strings arrays compatible with Apache Arrow"
 license = "Apache-2.0"
+keywords = ["arrow", "strings", "no-std", "tape", "storage"]
+categories = ["data-structures", "no-std"]
 
 [lib]
 path = "stringtape.rs"
 
 [features]
-default = []
+default = ["std"]
+std = []
