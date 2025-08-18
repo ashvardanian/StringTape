@@ -44,96 +44,76 @@ Offset buffer:  [0, 5, 10]
 
 ## API Overview
 
-### Creation
+### Basic Operations
 
 ```rust
-// Empty tape
-let tape = StringTape32::new();
+use stringtape::StringTape32;
 
-// Pre-allocated capacity
-let tape = StringTape32::with_capacity(1024, 100)?; // 1KB data, 100 strings
-
-// Custom allocator
-let allocator = DefaultAllocator;
-let tape = StringTape::new_in(allocator);
-let tape = StringTape::with_capacity_in(1024, 100, allocator)?;
-
-// From iterator
-let tape: StringTape32 = ["a", "b", "c"].into_iter().collect();
-```
-
-### Adding Strings
-
-```rust
 let mut tape = StringTape32::new();
+tape.push("hello")?;                    // Append one string
+tape.extend(["world", "foo"])?;         // Append an array
+assert_eq!(&tape[0], "hello");          // Direct indexing
+assert_eq!(tape.get(1), Some("world")); // Safe access
 
-// Single string
-tape.push("hello")?;
-
-// Multiple strings
-tape.extend(["world", "foo", "bar"])?;
-```
-
-### Accessing Strings
-
-```rust
-// By index (panics if out of bounds)
-let s = &tape[0];
-
-// Safe access
-let s = tape.get(0); // Returns Option<&str>
-
-// Zero-copy views and slicing
-let view = tape.view();              // View entire tape
-let subview = tape.subview(1, 3)?;   // Slice [1, 3)
-let nested = subview.subview(0, 1)?; // Nested views
-let data = &tape.view()[1..3];       // Raw data slice [i..n]
-
-// Iteration
-for s in &tape {
+for s in &tape { // Iterate
     println!("{}", s);
 }
 
-// Collect to Vec
-let strings: Vec<&str> = tape.iter().collect();
+// Construct from an iterator
+let tape2: StringTape32 = ["a", "b", "c"].into_iter().collect();
 ```
 
-### Capacity Management
+### Views and Slicing
 
 ```rust
-let mut tape = StringTape32::new();
+let view = tape.view();              // View entire tape
+let subview = tape.subview(1, 3)?;   // Items [1, 3)
+let nested = subview.subview(0, 1)?; // Nested subviews
+let raw_bytes = &tape.view()[1..3];  // Raw byte slice
 
-// Check sizes
-println!("Strings: {}", tape.len());
-println!("Data bytes: {}", tape.data_len());
-println!("Data capacity: {}", tape.data_capacity());
+// Views have same API as tapes
+assert_eq!(subview.len(), 2);
+assert_eq!(&subview[0], "world");
+```
 
-// Reserve space
-tape.reserve(1024, 100)?; // 1KB data, 100 strings
+### Memory Management
 
-// Clear contents
-tape.clear();
+```rust
+// Pre-allocate capacity
+let tape = StringTape32::with_capacity(1024, 100)?; // 1KB data, 100 strings
 
-// Truncate
-tape.truncate(5); // Keep first 5 strings
+// Monitor usage
+println!("Items: {}, Data: {} bytes", tape.len(), tape.data_len());
+
+// Modify
+tape.clear();           // Remove all items
+tape.truncate(5);       // Keep first 5 items
+
+// Custom allocators
+use allocator_api2::alloc::Global;
+let tape = StringTape::new_in(Global);
 ```
 
 ### Apache Arrow Interop
 
-These APIs can be used to construct Arrow arrays without copying the data:
+True zero-copy conversion to/from Arrow arrays:
 
 ```rust
-let mut tape = StringTape32::new();
-tape.push("hello")?;
-tape.push("world")?;
+// StringTape → Arrow (zero-copy)
+let (data_slice, offsets_slice) = tape.arrow_slices();
+let data_buffer = Buffer::from_slice_ref(data_slice);
+let offsets_buffer = OffsetBuffer::new(ScalarBuffer::new(
+    Buffer::from_slice_ref(offsets_slice), 0, offsets_slice.len()
+));
+let arrow_array = StringArray::new(offsets_buffer, data_buffer, None);
 
-let (data_ptr, offsets_ptr, data_len, string_count) = tape.as_raw_parts();
-
-// BytesTape also available for binary data
-let mut bytes = BytesTape32::new();
-bytes.push(&[1, 2, 3])?;
-bytes.push(b"hello")?;
-// Same view/subview API works for bytes
+// Arrow → StringTapeView (zero-copy)
+let view = unsafe {
+    StringTapeView32::from_raw_parts(
+        arrow_array.values(),
+        arrow_array.offsets().as_ref(),
+    )
+};
 ```
 
 ## `no_std` Support
@@ -147,8 +127,8 @@ stringtape = { version = "0.1", default-features = false }
 
 In `no_std` mode:
 
-- Requires `alloc` for dynamic allocation
 - All functionality is preserved
+- Requires `alloc` for dynamic allocation
 - Error types implement `Display` but not `std::error::Error`
 
 ## Testing
@@ -157,7 +137,7 @@ Run tests for both `std` and `no_std` configurations:
 
 ```bash
 cargo test                          # Test with std (default)
-cargo test --no-default-features    # Test without std
 cargo test --doc                    # Test documentation examples
+cargo test --no-default-features    # Test without std
 cargo test --all-features           # Test with all features enabled
 ```

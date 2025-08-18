@@ -592,6 +592,35 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
         (data_ptr, offsets_ptr, self.len_bytes, self.len_items)
     }
 
+    /// Returns a slice view of the data buffer.
+    ///
+    /// This provides a cleaner interface for accessing the underlying data
+    /// without dealing with raw pointers.
+    pub fn data_slice(&self) -> &[u8] {
+        if let Some(data_ptr) = self.data {
+            unsafe { core::slice::from_raw_parts(data_ptr.as_ptr().cast::<u8>(), self.len_bytes) }
+        } else {
+            &[]
+        }
+    }
+
+    /// Returns a slice view of the offsets buffer.
+    ///
+    /// This provides a cleaner interface for accessing the underlying offsets
+    /// without dealing with raw pointers. The slice contains `len() + 1` elements.
+    pub fn offsets_slice(&self) -> &[Offset] {
+        if let Some(offsets_ptr) = self.offsets {
+            unsafe {
+                core::slice::from_raw_parts(
+                    offsets_ptr.as_ptr().cast::<Offset>(),
+                    self.len_items + 1,
+                )
+            }
+        } else {
+            &[]
+        }
+    }
+
     /// Returns a reference to the allocator used by this tape.
     pub fn allocator(&self) -> &A {
         &self.allocator
@@ -755,6 +784,19 @@ impl<'a, Offset: OffsetType> RawTapeView<'a, Offset> {
         Ok(Self { data, offsets })
     }
 
+    /// Creates a zero-copy view from raw Arrow-compatible parts.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// - `data` contains valid bytes for the lifetime `'a`
+    /// - `offsets` contains valid offsets with length `items_len + 1`
+    /// - All offsets are within bounds of the data slice
+    /// - For StringTapeView, data must be valid UTF-8
+    pub unsafe fn from_raw_parts(data: &'a [u8], offsets: &'a [Offset]) -> Self {
+        Self { data, offsets }
+    }
+
     /// Returns a reference to the bytes at the given index within this view.
     pub fn get(&self, index: usize) -> Option<&[u8]> {
         if index >= self.len() {
@@ -893,6 +935,20 @@ impl<'a, Offset: OffsetType> Index<RangeToInclusive<usize>> for RawTapeView<'a, 
 // ========================
 
 impl<'a, Offset: OffsetType> StringTapeView<'a, Offset> {
+    /// Creates a zero-copy StringTapeView from raw Arrow StringArray parts.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// - `data` contains valid UTF-8 bytes for the lifetime `'a`
+    /// - `offsets` contains valid offsets with appropriate length
+    /// - All offsets are within bounds of the data slice
+    pub unsafe fn from_raw_parts(data: &'a [u8], offsets: &'a [Offset]) -> Self {
+        Self {
+            inner: RawTapeView::from_raw_parts(data, offsets),
+        }
+    }
+
     /// Returns a reference to the string at the given index, or `None` if out of bounds.
     pub fn get(&self, index: usize) -> Option<&str> {
         // Safe because StringTapeView only comes from StringTape which validates UTF-8
@@ -946,6 +1002,20 @@ impl<'a, Offset: OffsetType> Index<usize> for StringTapeView<'a, Offset> {
 // ========================
 
 impl<'a, Offset: OffsetType> BytesTapeView<'a, Offset> {
+    /// Creates a zero-copy BytesTapeView from raw Arrow BinaryArray parts.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// - `data` contains valid bytes for the lifetime `'a`
+    /// - `offsets` contains valid offsets with appropriate length
+    /// - All offsets are within bounds of the data slice
+    pub unsafe fn from_raw_parts(data: &'a [u8], offsets: &'a [Offset]) -> Self {
+        Self {
+            inner: RawTapeView::from_raw_parts(data, offsets),
+        }
+    }
+
     /// Returns a reference to the bytes at the given index, or `None` if out of bounds.
     pub fn get(&self, index: usize) -> Option<&[u8]> {
         self.inner.get(index)
@@ -1104,6 +1174,16 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         self.inner.as_raw_parts()
     }
 
+    /// Returns a slice view of the data buffer.
+    pub fn data_slice(&self) -> &[u8] {
+        self.inner.data_slice()
+    }
+
+    /// Returns a slice view of the offsets buffer.
+    pub fn offsets_slice(&self) -> &[Offset] {
+        self.inner.offsets_slice()
+    }
+
     pub fn iter(&self) -> StringTapeIter<'_, Offset, A> {
         StringTapeIter {
             tape: self,
@@ -1132,6 +1212,11 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         Ok(StringTapeView {
             inner: self.inner.subview(start, end)?,
         })
+    }
+
+    /// Returns data and offsets slices for zero-copy Arrow conversion.
+    pub fn arrow_slices(&self) -> (&[u8], &[Offset]) {
+        (self.data_slice(), self.offsets_slice())
     }
 }
 
@@ -1310,6 +1395,16 @@ impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
         self.inner.as_raw_parts()
     }
 
+    /// Returns a slice view of the data buffer.
+    pub fn data_slice(&self) -> &[u8] {
+        self.inner.data_slice()
+    }
+
+    /// Returns a slice view of the offsets buffer.
+    pub fn offsets_slice(&self) -> &[Offset] {
+        self.inner.offsets_slice()
+    }
+
     /// Returns a reference to the allocator used by this BytesTape.
     pub fn allocator(&self) -> &A {
         self.inner.allocator()
@@ -1331,6 +1426,11 @@ impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
         Ok(BytesTapeView {
             inner: self.inner.subview(start, end)?,
         })
+    }
+
+    /// Returns data and offsets slices for zero-copy Arrow conversion.
+    pub fn arrow_slices(&self) -> (&[u8], &[Offset]) {
+        (self.data_slice(), self.offsets_slice())
     }
 }
 
@@ -1713,20 +1813,103 @@ mod tests {
 
         // While we can't return views with [..] syntax due to lifetime constraints,
         // we can test that the view() and subview() API works correctly
-        
+
         // Get full view
         let full_view = tape.view();
         assert_eq!(full_view.len(), 4);
-        
-        // Get subviews 
+
+        // Get subviews
         let sub = tape.subview(1, 3).unwrap();
         assert_eq!(sub.len(), 2);
         assert_eq!(sub.get(0), Some("b"));
         assert_eq!(sub.get(1), Some("c"));
-        
+
         // Test subview of subview
         let sub_sub = sub.subview(0, 1).unwrap();
         assert_eq!(sub_sub.len(), 1);
         assert_eq!(sub_sub.get(0), Some("b"));
+    }
+
+    #[cfg(test)]
+    use arrow::array::{Array, BinaryArray, StringArray};
+    #[cfg(test)]
+    use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
+
+    #[test]
+    fn test_stringtape_to_arrow_string_array() {
+        let mut tape = StringTape32::new();
+        tape.extend(["hello", "world", "", "arrow"]).unwrap();
+
+        let (data_slice, offsets_slice) = tape.arrow_slices();
+        let data_buffer = Buffer::from_slice_ref(data_slice);
+        let offsets_buffer = OffsetBuffer::new(ScalarBuffer::new(
+            Buffer::from_slice_ref(offsets_slice),
+            0,
+            offsets_slice.len(),
+        ));
+        let arrow_array = StringArray::new(offsets_buffer, data_buffer, None);
+
+        assert_eq!(arrow_array.len(), 4);
+        assert_eq!(arrow_array.value(0), "hello");
+        assert_eq!(arrow_array.value(2), "");
+    }
+
+    #[test]
+    fn test_arrow_string_array_to_stringtape_view() {
+        let arrow_array = StringArray::from(vec!["foo", "bar", ""]);
+
+        // Zero-copy conversion to StringTapeView
+        let view = unsafe {
+            StringTapeView32::from_raw_parts(arrow_array.values(), arrow_array.offsets().as_ref())
+        };
+
+        assert_eq!(view.len(), 3);
+        assert_eq!(view.get(0), Some("foo"));
+        assert_eq!(view.get(1), Some("bar"));
+        assert_eq!(view.get(2), Some(""));
+    }
+
+    #[test]
+    fn test_arrow_binary_array_to_bytestape_view() {
+        let values: Vec<Option<&[u8]>> = vec![Some(&[1u8, 2, 3]), Some(&[]), Some(&[4u8, 5])];
+        let arrow_array = BinaryArray::from(values);
+
+        // Zero-copy conversion to BytesTapeView
+        let view = unsafe {
+            BytesTapeView32::from_raw_parts(arrow_array.values(), arrow_array.offsets().as_ref())
+        };
+
+        assert_eq!(view.len(), 3);
+        assert_eq!(view.get(0), Some(&[1u8, 2, 3] as &[u8]));
+        assert_eq!(view.get(1), Some(&[] as &[u8]));
+        assert_eq!(view.get(2), Some(&[4u8, 5] as &[u8]));
+    }
+
+    #[test]
+    fn test_zero_copy_roundtrip() {
+        // Original data
+        let mut tape = StringTape32::new();
+        tape.extend(["hello", "", "world"]).unwrap();
+
+        // Convert to Arrow (zero-copy)
+        let (data_slice, offsets_slice) = tape.arrow_slices();
+        let data_buffer = Buffer::from_slice_ref(data_slice);
+        let offsets_buffer = OffsetBuffer::new(ScalarBuffer::new(
+            Buffer::from_slice_ref(offsets_slice),
+            0,
+            offsets_slice.len(),
+        ));
+        let arrow_array = StringArray::new(offsets_buffer, data_buffer, None);
+
+        // Convert back to StringTapeView (zero-copy)
+        let view = unsafe {
+            StringTapeView32::from_raw_parts(arrow_array.values(), arrow_array.offsets().as_ref())
+        };
+
+        // Verify data integrity without any copying
+        assert_eq!(view.len(), 3);
+        assert_eq!(view.get(0), Some("hello"));
+        assert_eq!(view.get(1), Some(""));
+        assert_eq!(view.get(2), Some("world"));
     }
 }

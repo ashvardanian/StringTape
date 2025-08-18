@@ -15,6 +15,9 @@ allocator-api2 = { version = "0.3", default-features = false, features = [
     "alloc",
 ] }
 
+[dev-dependencies]
+arrow = { version = "53", default-features = false }
+
 [features]
 default = ["std"]
 std = ["allocator-api2/std"]
