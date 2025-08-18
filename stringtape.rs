@@ -2,7 +2,7 @@
 
 //! # StringTape
 //!
-//! Memory-efficient string storage compatible with Apache Arrow.
+//! Memory-efficient string and bytes storage compatible with Apache Arrow.
 //!
 //! ```rust
 //! use stringtape::{StringTape32, StringTapeError};
@@ -18,6 +18,19 @@
 //! for s in &tape {
 //!     println!("{}", s);
 //! }
+//! # Ok::<(), StringTapeError>(())
+//! ```
+//!
+//! It also supports binary data via `BytesTape`:
+//!
+//! ```rust
+//! use stringtape::{BytesTape32, StringTapeError};
+//!
+//! let mut tape = BytesTape32::new();
+//! tape.push(&[0xde, 0xad, 0xbe, 0xef])?;
+//! tape.push(b"bytes")?;
+//!
+//! assert_eq!(&tape[1], b"bytes" as &[u8]);
 //! # Ok::<(), StringTapeError>(())
 //! ```
 
@@ -109,13 +122,23 @@ impl std::error::Error for StringTapeError {}
 /// Data buffer:    [h,e,l,l,o,w,o,r,l,d]
 /// Offset buffer:  [0, 5, 10]
 /// ```
-pub struct StringTape<Offset: OffsetType = i32, A: Allocator = Global> {
+struct RawTape<Offset: OffsetType, A: Allocator> {
     data: Option<NonNull<[u8]>>,
     offsets: Option<NonNull<[Offset]>>,
     len_bytes: usize,
-    len_strings: usize,
+    len_items: usize,
     allocator: A,
     _phantom: PhantomData<Offset>,
+}
+
+/// UTF-8 string view over `RawTape`.
+pub struct StringTape<Offset: OffsetType = i32, A: Allocator = Global> {
+    inner: RawTape<Offset, A>,
+}
+
+/// Binary bytes view over `RawTape`.
+pub struct BytesTape<Offset: OffsetType = i32, A: Allocator = Global> {
+    inner: RawTape<Offset, A>,
 }
 
 /// Trait for offset types used in StringTape.
@@ -164,7 +187,7 @@ impl OffsetType for i64 {
     }
 }
 
-impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
+impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
     /// Creates a new, empty StringTape with the global allocator.
     ///
     /// This operation is O(1) and does not allocate memory until the first string is pushed.
@@ -178,8 +201,8 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
     /// assert!(tape.is_empty());
     /// assert_eq!(tape.len(), 0);
     /// ```
-    pub fn new() -> StringTape<Offset, Global> {
-        StringTape::new_in(Global)
+    pub fn new() -> RawTape<Offset, Global> {
+        RawTape::new_in(Global)
     }
 
     /// Creates a new, empty StringTape with a custom allocator.
@@ -201,7 +224,7 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
             data: None,
             offsets: None,
             len_bytes: 0,
-            len_strings: 0,
+            len_items: 0,
             allocator,
             _phantom: PhantomData,
         }
@@ -230,8 +253,8 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
     pub fn with_capacity(
         data_capacity: usize,
         strings_capacity: usize,
-    ) -> Result<StringTape<Offset, Global>, StringTapeError> {
-        StringTape::with_capacity_in(data_capacity, strings_capacity, Global)
+    ) -> Result<RawTape<Offset, Global>, StringTapeError> {
+        RawTape::with_capacity_in(data_capacity, strings_capacity, Global)
     }
 
     /// Creates a new StringTape with pre-allocated capacity and a custom allocator.
@@ -346,11 +369,11 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         Ok(())
     }
 
-    /// Adds a string to the end of the StringTape.
+    /// Adds a raw bytes slice to the end of the tape.
     ///
     /// # Errors
     ///
-    /// Returns `StringTapeError::OffsetOverflow` if adding this string would cause
+    /// Returns `StringTapeError::OffsetOverflow` if adding this slice would cause
     /// the total data size to exceed the maximum value representable by the offset type.
     ///
     /// Returns `StringTapeError::AllocationError` if memory allocation fails.
@@ -358,17 +381,15 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::{StringTape32, StringTapeError};
+    /// use stringtape::{BytesTape32, StringTapeError};
     ///
-    /// let mut tape = StringTape32::new();
-    /// tape.push("hello")?;
-    /// tape.push("world")?;
-    ///
+    /// let mut tape = BytesTape32::new();
+    /// tape.push(b"hello")?;
+    /// tape.push(&[1, 2, 3])?;
     /// assert_eq!(tape.len(), 2);
     /// # Ok::<(), StringTapeError>(())
     /// ```
-    pub fn push(&mut self, s: &str) -> Result<(), StringTapeError> {
-        let bytes = s.as_bytes();
+    pub fn push(&mut self, bytes: &[u8]) -> Result<(), StringTapeError> {
         let required_capacity = self
             .len_bytes
             .checked_add(bytes.len())
@@ -381,9 +402,9 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         }
 
         let current_offsets_capacity = self.offsets_capacity();
-        if self.len_strings + 1 >= current_offsets_capacity {
+        if self.len_items + 1 >= current_offsets_capacity {
             let new_capacity = (current_offsets_capacity * 2)
-                .max(self.len_strings + 2)
+                .max(self.len_items + 2)
                 .max(8);
             self.grow_offsets(new_capacity)?;
         }
@@ -400,14 +421,14 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         }
 
         self.len_bytes += bytes.len();
-        self.len_strings += 1;
+        self.len_items += 1;
 
         // Write new offset
         let offset = Offset::from_usize(self.len_bytes).ok_or(StringTapeError::OffsetOverflow)?;
         if let Some(offsets_ptr) = self.offsets {
             unsafe {
                 ptr::write(
-                    offsets_ptr.as_ptr().cast::<Offset>().add(self.len_strings),
+                    offsets_ptr.as_ptr().cast::<Offset>().add(self.len_items),
                     offset,
                 );
             }
@@ -416,11 +437,11 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         Ok(())
     }
 
-    /// Returns a reference to the string at the given index, or `None` if out of bounds.
+    /// Returns a reference to the bytes at the given index, or `None` if out of bounds.
     ///
     /// This operation is O(1).
-    pub fn get(&self, index: usize) -> Option<&str> {
-        if index >= self.len_strings {
+    pub fn get(&self, index: usize) -> Option<&[u8]> {
+        if index >= self.len_items {
             return None;
         }
 
@@ -438,23 +459,21 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
             };
             let end_offset = ptr::read(offsets_ptr.add(index + 1)).to_usize();
 
-            let slice = slice::from_raw_parts(
+            Some(slice::from_raw_parts(
                 data_ptr.as_ptr().cast::<u8>().add(start_offset),
                 end_offset - start_offset,
-            );
-
-            Some(core::str::from_utf8_unchecked(slice))
+            ))
         }
     }
 
-    /// Returns the number of strings in the StringTape.
+    /// Returns the number of items in the tape.
     pub fn len(&self) -> usize {
-        self.len_strings
+        self.len_items
     }
 
     /// Returns `true` if the StringTape contains no strings.
     pub fn is_empty(&self) -> bool {
-        self.len_strings == 0
+        self.len_items == 0
     }
 
     /// Returns the total number of bytes used by string data.
@@ -462,9 +481,9 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         self.len_bytes
     }
 
-    /// Returns the number of strings currently stored (same as `len()`).
+    /// Returns the number of items currently stored (same as `len()`).
     pub fn capacity(&self) -> usize {
-        self.len_strings
+        self.len_items
     }
 
     /// Returns the number of bytes allocated for string data.
@@ -477,10 +496,10 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         self.offsets.map(|ptr| ptr.len()).unwrap_or(0)
     }
 
-    /// Removes all strings from the StringTape, keeping allocated capacity.
+    /// Removes all items from the tape, keeping allocated capacity.
     pub fn clear(&mut self) {
         self.len_bytes = 0;
-        self.len_strings = 0;
+        self.len_items = 0;
         if let Some(offsets_ptr) = self.offsets {
             unsafe {
                 ptr::write(offsets_ptr.as_ptr().cast::<Offset>(), Offset::default());
@@ -488,15 +507,15 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         }
     }
 
-    /// Shortens the StringTape, keeping the first `len` strings and dropping the rest.
+    /// Shortens the tape, keeping the first `len` items and dropping the rest.
     ///
     /// If `len` is greater than the current length, this has no effect.
     pub fn truncate(&mut self, len: usize) {
-        if len >= self.len_strings {
+        if len >= self.len_items {
             return;
         }
 
-        self.len_strings = len;
+        self.len_items = len;
         self.len_bytes = if len == 0 {
             0
         } else if let Some(offsets_ptr) = self.offsets {
@@ -506,23 +525,22 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         };
     }
 
-    /// Extends the StringTape with the contents of an iterator.
+    /// Extends the tape with the contents of an iterator of byte slices.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::{StringTape32, StringTapeError};
+    /// use stringtape::{BytesTape32, StringTapeError};
     ///
-    /// let mut tape = StringTape32::new();
-    /// tape.extend(["hello", "world"])?;
-    ///
+    /// let mut tape = BytesTape32::new();
+    /// tape.extend([b"hello".as_slice(), b"world".as_slice()])?;
     /// assert_eq!(tape.len(), 2);
     /// # Ok::<(), StringTapeError>(())
     /// ```
     pub fn extend<I>(&mut self, iter: I) -> Result<(), StringTapeError>
     where
         I: IntoIterator,
-        I::Item: AsRef<str>,
+        I::Item: AsRef<[u8]>,
     {
         for s in iter {
             self.push(s.as_ref())?;
@@ -530,7 +548,7 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         Ok(())
     }
 
-    /// Returns the raw parts of the StringTape for Apache Arrow compatibility.
+    /// Returns the raw parts of the tape for Apache Arrow compatibility.
     ///
     /// Returns a tuple of:
     /// - Data buffer pointer
@@ -550,23 +568,16 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
             .offsets
             .map(|ptr| ptr.as_ptr().cast::<Offset>() as *const Offset)
             .unwrap_or(ptr::null());
-        (data_ptr, offsets_ptr, self.len_bytes, self.len_strings)
+        (data_ptr, offsets_ptr, self.len_bytes, self.len_items)
     }
 
-    pub fn iter(&self) -> StringTapeIter<'_, Offset, A> {
-        StringTapeIter {
-            tape: self,
-            index: 0,
-        }
-    }
-
-    /// Returns a reference to the allocator used by this StringTape.
+    /// Returns a reference to the allocator used by this tape.
     pub fn allocator(&self) -> &A {
         &self.allocator
     }
 }
 
-impl<Offset: OffsetType, A: Allocator> Drop for StringTape<Offset, A> {
+impl<Offset: OffsetType, A: Allocator> Drop for RawTape<Offset, A> {
     fn drop(&mut self) {
         if let Some(data_ptr) = self.data {
             let layout = Layout::array::<u8>(data_ptr.len()).unwrap();
@@ -580,6 +591,131 @@ impl<Offset: OffsetType, A: Allocator> Drop for StringTape<Offset, A> {
                 self.allocator.deallocate(offsets_ptr.cast(), layout);
             }
         }
+    }
+}
+
+unsafe impl<Offset: OffsetType + Send, A: Allocator + Send> Send for RawTape<Offset, A> {}
+unsafe impl<Offset: OffsetType + Sync, A: Allocator + Sync> Sync for RawTape<Offset, A> {}
+
+// ========================
+// StringTape (UTF-8 view)
+// ========================
+
+impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
+    /// Creates a new, empty StringTape with the global allocator.
+    pub fn new() -> StringTape<Offset, Global> {
+        StringTape {
+            inner: RawTape::<Offset, Global>::new(),
+        }
+    }
+
+    /// Creates a new, empty StringTape with a custom allocator.
+    pub fn new_in(allocator: A) -> Self {
+        Self {
+            inner: RawTape::<Offset, A>::new_in(allocator),
+        }
+    }
+
+    /// Creates a new StringTape with pre-allocated capacity using the global allocator.
+    pub fn with_capacity(
+        data_capacity: usize,
+        strings_capacity: usize,
+    ) -> Result<StringTape<Offset, Global>, StringTapeError> {
+        Ok(StringTape {
+            inner: RawTape::<Offset, Global>::with_capacity(data_capacity, strings_capacity)?,
+        })
+    }
+
+    /// Creates a new StringTape with pre-allocated capacity and a custom allocator.
+    pub fn with_capacity_in(
+        data_capacity: usize,
+        strings_capacity: usize,
+        allocator: A,
+    ) -> Result<Self, StringTapeError> {
+        Ok(Self {
+            inner: RawTape::<Offset, A>::with_capacity_in(data_capacity, strings_capacity, allocator)?,
+        })
+    }
+
+    /// Adds a string to the end of the StringTape.
+    pub fn push(&mut self, s: &str) -> Result<(), StringTapeError> {
+        self.inner.push(s.as_bytes())
+    }
+
+    /// Returns a reference to the string at the given index, or `None` if out of bounds.
+    pub fn get(&self, index: usize) -> Option<&str> {
+        // Safe because StringTape only accepts &str pushes.
+        self.inner.get(index).map(|b| unsafe { core::str::from_utf8_unchecked(b) })
+    }
+
+    /// Returns the number of strings in the StringTape.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns `true` if the StringTape contains no strings.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Returns the total number of bytes used by string data.
+    pub fn data_len(&self) -> usize {
+        self.inner.data_len()
+    }
+
+    /// Returns the number of bytes allocated for string data.
+    pub fn data_capacity(&self) -> usize {
+        self.inner.data_capacity()
+    }
+
+    fn offsets_capacity(&self) -> usize {
+        self.inner.offsets_capacity()
+    }
+
+    /// Removes all strings from the StringTape, keeping allocated capacity.
+    pub fn clear(&mut self) {
+        self.inner.clear()
+    }
+
+    /// Shortens the StringTape, keeping the first `len` strings and dropping the rest.
+    pub fn truncate(&mut self, len: usize) {
+        self.inner.truncate(len)
+    }
+
+    /// Extends the StringTape with the contents of an iterator.
+    pub fn extend<I>(&mut self, iter: I) -> Result<(), StringTapeError>
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+    {
+        for s in iter {
+            self.push(s.as_ref())?;
+        }
+        Ok(())
+    }
+
+    /// Returns the raw parts of the StringTape for Apache Arrow compatibility.
+    pub fn as_raw_parts(&self) -> (*const u8, *const Offset, usize, usize) {
+        self.inner.as_raw_parts()
+    }
+
+    pub fn iter(&self) -> StringTapeIter<'_, Offset, A> {
+        StringTapeIter {
+            tape: self,
+            index: 0,
+        }
+    }
+
+    /// Returns a reference to the allocator used by this StringTape.
+    pub fn allocator(&self) -> &A {
+        self.inner.allocator()
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Drop for StringTape<Offset, A> {
+    fn drop(&mut self) {
+        // Explicit drop of inner to run RawTape's Drop
+        // (redundant but keeps intent clear)
     }
 }
 
@@ -649,8 +785,122 @@ impl<'a, Offset: OffsetType, A: Allocator> IntoIterator for &'a StringTape<Offse
     }
 }
 
+// ======================
+// BytesTape (bytes view)
+// ======================
+
+impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
+    /// Creates a new, empty BytesTape with the global allocator.
+    pub fn new() -> BytesTape<Offset, Global> {
+        BytesTape {
+            inner: RawTape::<Offset, Global>::new(),
+        }
+    }
+
+    /// Creates a new, empty BytesTape with a custom allocator.
+    pub fn new_in(allocator: A) -> Self {
+        Self {
+            inner: RawTape::<Offset, A>::new_in(allocator),
+        }
+    }
+
+    /// Creates a new BytesTape with pre-allocated capacity using the global allocator.
+    pub fn with_capacity(
+        data_capacity: usize,
+        items_capacity: usize,
+    ) -> Result<BytesTape<Offset, Global>, StringTapeError> {
+        Ok(BytesTape {
+            inner: RawTape::<Offset, Global>::with_capacity(data_capacity, items_capacity)?,
+        })
+    }
+
+    /// Creates a new BytesTape with pre-allocated capacity and a custom allocator.
+    pub fn with_capacity_in(
+        data_capacity: usize,
+        items_capacity: usize,
+        allocator: A,
+    ) -> Result<Self, StringTapeError> {
+        Ok(Self {
+            inner: RawTape::<Offset, A>::with_capacity_in(data_capacity, items_capacity, allocator)?,
+        })
+    }
+
+    /// Adds bytes to the end of the tape.
+    pub fn push(&mut self, bytes: &[u8]) -> Result<(), StringTapeError> {
+        self.inner.push(bytes)
+    }
+
+    /// Returns a reference to the bytes at the given index, or `None` if out of bounds.
+    pub fn get(&self, index: usize) -> Option<&[u8]> {
+        self.inner.get(index)
+    }
+
+    /// Returns the number of items in the tape.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns `true` if the tape contains no items.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Returns the total number of bytes used by data.
+    pub fn data_len(&self) -> usize {
+        self.inner.data_len()
+    }
+
+    /// Returns the number of bytes allocated for data.
+    pub fn data_capacity(&self) -> usize {
+        self.inner.data_capacity()
+    }
+
+    fn offsets_capacity(&self) -> usize {
+        self.inner.offsets_capacity()
+    }
+
+    /// Removes all items from the tape, keeping allocated capacity.
+    pub fn clear(&mut self) {
+        self.inner.clear()
+    }
+
+    /// Shortens the tape, keeping the first `len` items and dropping the rest.
+    pub fn truncate(&mut self, len: usize) {
+        self.inner.truncate(len)
+    }
+
+    /// Extends the tape with the contents of an iterator of bytes.
+    pub fn extend<I>(&mut self, iter: I) -> Result<(), StringTapeError>
+    where
+        I: IntoIterator,
+        I::Item: AsRef<[u8]>,
+    {
+        self.inner.extend(iter)
+    }
+
+    /// Returns the raw parts of the tape for Apache Arrow compatibility.
+    pub fn as_raw_parts(&self) -> (*const u8, *const Offset, usize, usize) {
+        self.inner.as_raw_parts()
+    }
+
+    /// Returns a reference to the allocator used by this BytesTape.
+    pub fn allocator(&self) -> &A {
+        self.inner.allocator()
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Index<usize> for BytesTape<Offset, A> {
+    type Output = [u8];
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index).expect("index out of bounds")
+    }
+}
+
 pub type StringTape32 = StringTape<i32, Global>;
 pub type StringTape64 = StringTape<i64, Global>;
+pub type BytesTape32 = BytesTape<i32, Global>;
+pub type BytesTape64 = BytesTape<i64, Global>;
 
 impl<Offset: OffsetType> Default for StringTape<Offset, Global> {
     fn default() -> Self {
@@ -814,5 +1064,16 @@ mod tests {
 
         assert_eq!(tape.data_capacity(), 256);
         assert!(tape.is_empty());
+    }
+
+    #[test]
+    fn test_bytes_tape_basic() {
+        let mut tape = BytesTape32::new();
+        tape.push(&[1, 2, 3]).unwrap();
+        tape.push(b"abc").unwrap();
+
+        assert_eq!(tape.len(), 2);
+        assert_eq!(&tape[0], &[1u8, 2, 3] as &[u8]);
+        assert_eq!(&tape[1], b"abc" as &[u8]);
     }
 }
