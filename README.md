@@ -1,11 +1,10 @@
 # StringTape
 
-A memory-efficient string storage library compatible with Apache Arrow's string array format.
+A memory-efficient string storage library compatible with [Apache Arrow](https://arrow.apache.org/)'s string array format.
 Stores multiple strings in a contiguous memory layout using offset-based indexing, similar to Arrow's `String` and `LargeString` arrays.
 
-- __Apache Arrow Compatible__: Uses i32/i64 offsets like Arrow's String/LargeString arrays
+- __Apache Arrow Compatible__: Similar to `String` and `LargeString` classes
 - __Memory Efficient__: All strings stored in a single contiguous buffer
-- __Type Safe__: Generic over offset types (i32 for 32-bit, i64 for 64-bit)
 - __`no_std` Support__: Can be used in embedded environments
 - __Zero Dependencies__: Pure Rust implementation
 
@@ -53,6 +52,11 @@ let tape = StringTape32::new();
 
 // Pre-allocated capacity
 let tape = StringTape32::with_capacity(1024, 100)?; // 1KB data, 100 strings
+
+// Custom allocator
+let allocator = DefaultAllocator;
+let tape = StringTape::new_in(allocator);
+let tape = StringTape::with_capacity_in(1024, 100, allocator)?;
 
 // From iterator
 let tape: StringTape32 = ["a", "b", "c"].into_iter().collect();
@@ -110,32 +114,17 @@ tape.truncate(5); // Keep first 5 strings
 
 ### Apache Arrow Interop
 
+These APIs can be used to construct Arrow arrays without copying the data:
+
 ```rust
 let mut tape = StringTape32::new();
 tape.push("hello")?;
 tape.push("world")?;
 
-// Get raw pointers for Arrow compatibility
 let (data_ptr, offsets_ptr, data_len, string_count) = tape.as_raw_parts();
-
-// These can be used to construct Arrow arrays without copying
 ```
 
-## Offset Types
-
-StringTape supports two offset types:
-
-- __`StringTape32`__ (alias for `StringTape<i32>`): Compatible with Arrow's `String` arrays, supports up to 2GB of string data
-- __`StringTape64`__ (alias for `StringTape<i64>`): Compatible with Arrow's `LargeString` arrays, supports virtually unlimited string data
-
-```rust
-use stringtape::{StringTape32, StringTape64};
-
-let small_tape = StringTape32::new(); // For < 2GB of data
-let large_tape = StringTape64::new(); // For >= 2GB of data
-```
-
-## no_std Support
+## `no_std` Support
 
 StringTape can be used in `no_std` environments:
 
@@ -145,6 +134,7 @@ stringtape = { version = "0.1", default-features = false }
 ```
 
 In `no_std` mode:
+
 - Requires `alloc` for dynamic allocation
 - All functionality is preserved
 - Error types implement `Display` but not `std::error::Error`
@@ -154,18 +144,8 @@ In `no_std` mode:
 Run tests for both `std` and `no_std` configurations:
 
 ```bash
-# Test with std (default)
-cargo test
-
-# Test without std
-cargo test --no-default-features
-
-# Test both configurations
-cargo test && cargo test --no-default-features
-
-# Run documentation tests
-cargo test --doc
-
-# Test with all features
-cargo test --all-features
+cargo test                          # Test with std (default)
+cargo test --no-default-features    # Test without std
+cargo test --doc                    # Test documentation examples
+cargo test --all-features           # Test with all features enabled
 ```

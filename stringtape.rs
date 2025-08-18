@@ -28,9 +28,9 @@ extern crate std;
 extern crate alloc;
 
 #[cfg(not(feature = "std"))]
-use alloc::alloc::{alloc, dealloc, realloc, Layout};
+use alloc::alloc::{alloc, dealloc, realloc, Layout, GlobalAlloc};
 #[cfg(feature = "std")]
-use std::alloc::{alloc, dealloc, realloc, Layout};
+use std::alloc::{alloc, dealloc, realloc, Layout, GlobalAlloc};
 
 use core::fmt;
 use core::marker::PhantomData;
@@ -77,14 +77,15 @@ impl std::error::Error for StringTapeError {}
 /// # Type Parameters
 ///
 /// * `Offset` - The offset type used for indexing (`i32` for StringTape32, `i64` for StringTape64)
+/// * `A` - The allocator type used for memory allocation
 ///
 /// # Examples
 ///
 /// ```rust
-/// use stringtape::{StringTape, StringTapeError};
+/// use stringtape::{StringTape, StringTapeError, DefaultAllocator};
 ///
-/// // Create a new StringTape with i32 offsets
-/// let mut tape: StringTape<i32> = StringTape::new();
+/// // Create a new StringTape with i32 offsets and default allocator
+/// let mut tape: StringTape<i32, DefaultAllocator> = StringTape::new();
 /// tape.push("hello")?;
 /// tape.push("world")?;
 ///
@@ -101,14 +102,79 @@ impl std::error::Error for StringTapeError {}
 /// Data buffer:    [h,e,l,l,o,w,o,r,l,d]
 /// Offset buffer:  [0, 5, 10]
 /// ```
-pub struct StringTape<Offset: OffsetType = i32> {
+pub struct StringTape<Offset: OffsetType = i32, A: Allocator = DefaultAllocator> {
     data: NonNull<u8>,
     offsets: NonNull<Offset>,
     capacity_bytes: usize,
     capacity_offsets: usize,
     len_bytes: usize,
     len_strings: usize,
+    allocator: A,
     _phantom: PhantomData<Offset>,
+}
+
+/// Trait for custom allocators used in StringTape.
+///
+/// This trait wraps the standard library's `GlobalAlloc` trait to provide
+/// allocation functionality for StringTape. The default implementation
+/// uses the global allocator.
+pub trait Allocator {
+    /// Allocate memory with the given layout.
+    /// 
+    /// # Safety
+    /// 
+    /// See `GlobalAlloc::alloc` for safety requirements.
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8;
+    
+    /// Deallocate memory with the given layout.
+    /// 
+    /// # Safety
+    /// 
+    /// See `GlobalAlloc::dealloc` for safety requirements.
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout);
+    
+    /// Reallocate memory with the given layout.
+    /// 
+    /// # Safety
+    /// 
+    /// See `GlobalAlloc::realloc` for safety requirements.
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8;
+}
+
+/// Default allocator implementation using the global allocator.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultAllocator;
+
+impl Allocator for DefaultAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        alloc(layout)
+    }
+    
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        dealloc(ptr, layout)
+    }
+    
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        realloc(ptr, layout, new_size)
+    }
+}
+
+/// Wrapper around any type that implements `GlobalAlloc`.
+#[derive(Debug)]
+pub struct GlobalAllocWrapper<T: GlobalAlloc>(pub T);
+
+impl<T: GlobalAlloc> Allocator for GlobalAllocWrapper<T> {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        self.0.alloc(layout)
+    }
+    
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        self.0.dealloc(ptr, layout)
+    }
+    
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        self.0.realloc(ptr, layout, new_size)
+    }
 }
 
 /// Trait for offset types used in StringTape.
@@ -157,8 +223,8 @@ impl OffsetType for i64 {
     }
 }
 
-impl<Offset: OffsetType> StringTape<Offset> {
-    /// Creates a new, empty StringTape.
+impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
+    /// Creates a new, empty StringTape with the default allocator.
     ///
     /// This operation is O(1) and does not allocate memory until the first string is pushed.
     ///
@@ -171,7 +237,28 @@ impl<Offset: OffsetType> StringTape<Offset> {
     /// assert!(tape.is_empty());
     /// assert_eq!(tape.len(), 0);
     /// ```
-    pub fn new() -> Self {
+    pub fn new() -> Self
+    where
+        A: Default,
+    {
+        Self::new_in(A::default())
+    }
+
+    /// Creates a new, empty StringTape with a custom allocator.
+    ///
+    /// This operation is O(1) and does not allocate memory until the first string is pushed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::{StringTape, DefaultAllocator};
+    ///
+    /// let allocator = DefaultAllocator;
+    /// let tape: StringTape<i32, DefaultAllocator> = StringTape::new_in(allocator);
+    /// assert!(tape.is_empty());
+    /// assert_eq!(tape.len(), 0);
+    /// ```
+    pub fn new_in(allocator: A) -> Self {
         Self {
             data: NonNull::dangling(),
             offsets: NonNull::dangling(),
@@ -179,11 +266,12 @@ impl<Offset: OffsetType> StringTape<Offset> {
             capacity_offsets: 0,
             len_bytes: 0,
             len_strings: 0,
+            allocator,
             _phantom: PhantomData,
         }
     }
 
-    /// Creates a new StringTape with pre-allocated capacity.
+    /// Creates a new StringTape with pre-allocated capacity using the default allocator.
     ///
     /// Pre-allocating capacity can improve performance when you know approximately
     /// how much data you'll be storing.
@@ -206,8 +294,40 @@ impl<Offset: OffsetType> StringTape<Offset> {
     pub fn with_capacity(
         data_capacity: usize,
         strings_capacity: usize,
+    ) -> Result<Self, StringTapeError>
+    where
+        A: Default,
+    {
+        Self::with_capacity_in(data_capacity, strings_capacity, A::default())
+    }
+
+    /// Creates a new StringTape with pre-allocated capacity and a custom allocator.
+    ///
+    /// Pre-allocating capacity can improve performance when you know approximately
+    /// how much data you'll be storing.
+    ///
+    /// # Arguments
+    ///
+    /// * `data_capacity` - Number of bytes to pre-allocate for string data
+    /// * `strings_capacity` - Number of string slots to pre-allocate
+    /// * `allocator` - The allocator to use for memory management
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::{StringTape, StringTapeError, DefaultAllocator};
+    ///
+    /// let allocator = DefaultAllocator;
+    /// let tape: StringTape<i32, DefaultAllocator> = StringTape::with_capacity_in(1024, 100, allocator)?;
+    /// assert_eq!(tape.data_capacity(), 1024);
+    /// # Ok::<(), StringTapeError>(())
+    /// ```
+    pub fn with_capacity_in(
+        data_capacity: usize,
+        strings_capacity: usize,
+        allocator: A,
     ) -> Result<Self, StringTapeError> {
-        let mut tape = Self::new();
+        let mut tape = Self::new_in(allocator);
         tape.reserve(data_capacity, strings_capacity)?;
         Ok(tape)
     }
@@ -244,10 +364,10 @@ impl<Offset: OffsetType> StringTape<Offset> {
             .map_err(|_| StringTapeError::AllocationError)?;
 
         let new_ptr = if self.capacity_bytes == 0 {
-            unsafe { alloc(new_layout) }
+            unsafe { self.allocator.alloc(new_layout) }
         } else {
             let old_layout = Layout::from_size_align(self.capacity_bytes, 1).unwrap();
-            unsafe { realloc(self.data.as_ptr(), old_layout, new_capacity) }
+            unsafe { self.allocator.realloc(self.data.as_ptr(), old_layout, new_capacity) }
         };
 
         self.data = NonNull::new(new_ptr).ok_or(StringTapeError::AllocationError)?;
@@ -265,7 +385,7 @@ impl<Offset: OffsetType> StringTape<Offset> {
                 .map_err(|_| StringTapeError::AllocationError)?;
 
         let new_ptr = if self.capacity_offsets == 0 {
-            let ptr = unsafe { alloc(new_layout) };
+            let ptr = unsafe { self.allocator.alloc(new_layout) };
             if ptr.is_null() {
                 return Err(StringTapeError::AllocationError);
             }
@@ -279,7 +399,7 @@ impl<Offset: OffsetType> StringTape<Offset> {
                 core::mem::align_of::<Offset>(),
             )
             .unwrap();
-            unsafe { realloc(self.offsets.as_ptr().cast(), old_layout, new_layout.size()) }
+            unsafe { self.allocator.realloc(self.offsets.as_ptr().cast(), old_layout, new_layout.size()) }
         };
 
         self.offsets = NonNull::new(new_ptr.cast()).ok_or(StringTapeError::AllocationError)?;
@@ -472,7 +592,7 @@ impl<Offset: OffsetType> StringTape<Offset> {
         )
     }
 
-    pub fn iter(&self) -> StringTapeIter<'_, Offset> {
+    pub fn iter(&self) -> StringTapeIter<'_, Offset, A> {
         StringTapeIter {
             tape: self,
             index: 0,
@@ -480,12 +600,12 @@ impl<Offset: OffsetType> StringTape<Offset> {
     }
 }
 
-impl<Offset: OffsetType> Drop for StringTape<Offset> {
+impl<Offset: OffsetType, A: Allocator> Drop for StringTape<Offset, A> {
     fn drop(&mut self) {
         if self.capacity_bytes > 0 {
             let layout = Layout::from_size_align(self.capacity_bytes, 1).unwrap();
             unsafe {
-                dealloc(self.data.as_ptr(), layout);
+                self.allocator.dealloc(self.data.as_ptr(), layout);
             }
         }
         if self.capacity_offsets > 0 {
@@ -495,21 +615,21 @@ impl<Offset: OffsetType> Drop for StringTape<Offset> {
             )
             .unwrap();
             unsafe {
-                dealloc(self.offsets.as_ptr().cast(), layout);
+                self.allocator.dealloc(self.offsets.as_ptr().cast(), layout);
             }
         }
     }
 }
 
-unsafe impl<Offset: OffsetType + Send> Send for StringTape<Offset> {}
-unsafe impl<Offset: OffsetType + Sync> Sync for StringTape<Offset> {}
+unsafe impl<Offset: OffsetType + Send, A: Allocator + Send> Send for StringTape<Offset, A> {}
+unsafe impl<Offset: OffsetType + Sync, A: Allocator + Sync> Sync for StringTape<Offset, A> {}
 
-pub struct StringTapeIter<'a, Offset: OffsetType> {
-    tape: &'a StringTape<Offset>,
+pub struct StringTapeIter<'a, Offset: OffsetType, A: Allocator> {
+    tape: &'a StringTape<Offset, A>,
     index: usize,
 }
 
-impl<'a, Offset: OffsetType> Iterator for StringTapeIter<'a, Offset> {
+impl<'a, Offset: OffsetType, A: Allocator> Iterator for StringTapeIter<'a, Offset, A> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -526,9 +646,9 @@ impl<'a, Offset: OffsetType> Iterator for StringTapeIter<'a, Offset> {
     }
 }
 
-impl<'a, Offset: OffsetType> ExactSizeIterator for StringTapeIter<'a, Offset> {}
+impl<'a, Offset: OffsetType, A: Allocator> ExactSizeIterator for StringTapeIter<'a, Offset, A> {}
 
-impl<Offset: OffsetType> FromIterator<String> for StringTape<Offset> {
+impl<Offset: OffsetType, A: Allocator + Default> FromIterator<String> for StringTape<Offset, A> {
     fn from_iter<I: IntoIterator<Item = String>>(iter: I) -> Self {
         let mut tape = StringTape::new();
         for s in iter {
@@ -539,7 +659,7 @@ impl<Offset: OffsetType> FromIterator<String> for StringTape<Offset> {
     }
 }
 
-impl<'a, Offset: OffsetType> FromIterator<&'a str> for StringTape<Offset> {
+impl<'a, Offset: OffsetType, A: Allocator + Default> FromIterator<&'a str> for StringTape<Offset, A> {
     fn from_iter<I: IntoIterator<Item = &'a str>>(iter: I) -> Self {
         let mut tape = StringTape::new();
         for s in iter {
@@ -550,7 +670,7 @@ impl<'a, Offset: OffsetType> FromIterator<&'a str> for StringTape<Offset> {
     }
 }
 
-impl<Offset: OffsetType> Index<usize> for StringTape<Offset> {
+impl<Offset: OffsetType, A: Allocator> Index<usize> for StringTape<Offset, A> {
     type Output = str;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -558,17 +678,30 @@ impl<Offset: OffsetType> Index<usize> for StringTape<Offset> {
     }
 }
 
-impl<'a, Offset: OffsetType> IntoIterator for &'a StringTape<Offset> {
+impl<'a, Offset: OffsetType, A: Allocator> IntoIterator for &'a StringTape<Offset, A> {
     type Item = &'a str;
-    type IntoIter = StringTapeIter<'a, Offset>;
+    type IntoIter = StringTapeIter<'a, Offset, A>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
 
-pub type StringTape32 = StringTape<i32>;
-pub type StringTape64 = StringTape<i64>;
+pub type StringTape32 = StringTape<i32, DefaultAllocator>;
+pub type StringTape64 = StringTape<i64, DefaultAllocator>;
+
+impl<Offset: OffsetType> Default for StringTape<Offset, DefaultAllocator> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
+    /// Returns a reference to the allocator used by this StringTape.
+    pub fn allocator(&self) -> &A {
+        &self.allocator
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -702,5 +835,32 @@ mod tests {
         let tape = StringTape32::with_capacity(100, 10).unwrap();
         assert_eq!(tape.data_capacity(), 100);
         assert_eq!(tape.capacity(), 0); // No strings added yet
+    }
+
+    #[test]
+    fn test_custom_allocator() {
+        let allocator = DefaultAllocator;
+        let mut tape: StringTape<i32, DefaultAllocator> = 
+            StringTape::new_in(allocator);
+        
+        tape.push("hello").unwrap();
+        tape.push("world").unwrap();
+        
+        assert_eq!(tape.len(), 2);
+        assert_eq!(tape.get(0), Some("hello"));
+        assert_eq!(tape.get(1), Some("world"));
+        
+        // Verify we can access the allocator
+        let _allocator_ref = tape.allocator();
+    }
+
+    #[test]
+    fn test_custom_allocator_with_capacity() {
+        let allocator = DefaultAllocator;
+        let tape: StringTape<i64, DefaultAllocator> = 
+            StringTape::with_capacity_in(256, 50, allocator).unwrap();
+        
+        assert_eq!(tape.data_capacity(), 256);
+        assert!(tape.is_empty());
     }
 }
