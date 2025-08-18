@@ -10,7 +10,7 @@ checksum = "78200ac3468a57d333cd0ea5dd398e25111194dcacd49208afca95c629a6311d"
 
 [[package]]
 name = "stringtape"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "allocator-api2",
 ]

@@ -1,6 +1,6 @@
 [package]
 name = "stringtape"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 description = "A tape class for strings arrays compatible with Apache Arrow"
 license = "Apache-2.0"
