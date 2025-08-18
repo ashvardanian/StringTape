@@ -663,6 +663,11 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         self.inner.data_len()
     }
 
+    /// Returns the number of strings currently stored (same as `len()`).
+    pub fn capacity(&self) -> usize {
+        self.inner.len()
+    }
+
     /// Returns the number of bytes allocated for string data.
     pub fn data_capacity(&self) -> usize {
         self.inner.data_capacity()
