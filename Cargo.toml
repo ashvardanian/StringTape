@@ -11,7 +11,9 @@ categories = ["data-structures", "no-std"]
 path = "stringtape.rs"
 
 [dependencies]
-allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+allocator-api2 = { version = "0.3", default-features = false, features = [
+    "alloc",
+] }
 
 [features]
 default = ["std"]
