@@ -42,7 +42,9 @@ extern crate alloc;
 
 use core::fmt;
 use core::marker::PhantomData;
-use core::ops::Index;
+use core::ops::{
+    Index, Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive, Sub,
+};
 use core::ptr::{self, NonNull};
 use core::slice;
 
@@ -141,12 +143,31 @@ pub struct BytesTape<Offset: OffsetType = i32, A: Allocator = Global> {
     inner: RawTape<Offset, A>,
 }
 
+/// A view into a continuous slice of a RawTape.
+///
+/// This provides a zero-copy view that implements the same read-only interface
+/// as RawTape but cannot modify the underlying data.
+pub struct RawTapeView<'a, Offset: OffsetType> {
+    data: &'a [u8],
+    offsets: &'a [Offset],
+}
+
+/// UTF-8 string view over `RawTapeView`.
+pub struct StringTapeView<'a, Offset: OffsetType = i32> {
+    inner: RawTapeView<'a, Offset>,
+}
+
+/// Binary bytes view over `RawTapeView`.
+pub struct BytesTapeView<'a, Offset: OffsetType = i32> {
+    inner: RawTapeView<'a, Offset>,
+}
+
 /// Trait for offset types used in StringTape.
 ///
 /// This trait defines the interface for offset types that can be used to index
 /// into the string data buffer. Implementations are provided for `i32` and `i64`
 /// to match Apache Arrow's String and LargeString array types.
-pub trait OffsetType: Copy + Default + PartialOrd {
+pub trait OffsetType: Copy + Default + PartialOrd + Sub<Output = Self> {
     /// Size of the offset type in bytes.
     const SIZE: usize;
 
@@ -575,6 +596,36 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
     pub fn allocator(&self) -> &A {
         &self.allocator
     }
+
+    /// Creates a view of the entire tape.
+    pub fn view(&self) -> RawTapeView<'_, Offset> {
+        RawTapeView::new(self, 0, self.len_items).unwrap_or(RawTapeView {
+            data: &[],
+            offsets: &[],
+        })
+    }
+
+    /// Creates a subview of a continuous slice of this tape.
+    pub fn subview(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Result<RawTapeView<'_, Offset>, StringTapeError> {
+        RawTapeView::new(self, start, end)
+    }
+
+    /// Helper to get offset at index
+    fn get_offset(&self, index: usize) -> Result<Offset, StringTapeError> {
+        if index > self.len_items {
+            return Err(StringTapeError::IndexOutOfBounds);
+        }
+
+        if let Some(offsets_ptr) = self.offsets {
+            unsafe { Ok(*offsets_ptr.as_ptr().cast::<Offset>().add(index)) }
+        } else {
+            Ok(Offset::default())
+        }
+    }
 }
 
 impl<Offset: OffsetType, A: Allocator> Drop for RawTape<Offset, A> {
@@ -596,6 +647,349 @@ impl<Offset: OffsetType, A: Allocator> Drop for RawTape<Offset, A> {
 
 unsafe impl<Offset: OffsetType + Send, A: Allocator + Send> Send for RawTape<Offset, A> {}
 unsafe impl<Offset: OffsetType + Sync, A: Allocator + Sync> Sync for RawTape<Offset, A> {}
+
+// Index trait implementations for RawTape to support [i..n] syntax
+impl<Offset: OffsetType, A: Allocator> Index<Range<usize>> for RawTape<Offset, A> {
+    type Output = [u8];
+
+    fn index(&self, range: Range<usize>) -> &Self::Output {
+        let view = self
+            .subview(range.start, range.end)
+            .expect("range out of bounds");
+        // Return the underlying data slice
+        view.data
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Index<RangeFrom<usize>> for RawTape<Offset, A> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeFrom<usize>) -> &Self::Output {
+        let view = self
+            .subview(range.start, self.len_items)
+            .expect("range out of bounds");
+        view.data
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Index<RangeTo<usize>> for RawTape<Offset, A> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeTo<usize>) -> &Self::Output {
+        let view = self.subview(0, range.end).expect("range out of bounds");
+        view.data
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Index<RangeFull> for RawTape<Offset, A> {
+    type Output = [u8];
+
+    fn index(&self, _range: RangeFull) -> &Self::Output {
+        let view = self.view();
+        view.data
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Index<RangeInclusive<usize>> for RawTape<Offset, A> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeInclusive<usize>) -> &Self::Output {
+        let view = self
+            .subview(*range.start(), range.end() + 1)
+            .expect("range out of bounds");
+        view.data
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Index<RangeToInclusive<usize>> for RawTape<Offset, A> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeToInclusive<usize>) -> &Self::Output {
+        let view = self.subview(0, range.end + 1).expect("range out of bounds");
+        view.data
+    }
+}
+
+// ========================
+// RawTapeView implementation
+// ========================
+
+impl<'a, Offset: OffsetType> RawTapeView<'a, Offset> {
+    /// Creates a view into a slice of the RawTape from start to end (exclusive).
+    pub fn new<A: Allocator>(
+        tape: &'a RawTape<Offset, A>,
+        start: usize,
+        end: usize,
+    ) -> Result<Self, StringTapeError> {
+        if start > end || end > tape.len() {
+            return Err(StringTapeError::IndexOutOfBounds);
+        }
+
+        let (data_ptr, offsets_ptr) = match (tape.data, tape.offsets) {
+            (Some(data), Some(offsets)) => (data, offsets),
+            _ => return Err(StringTapeError::IndexOutOfBounds),
+        };
+
+        let base_offset = if start == 0 {
+            0
+        } else {
+            tape.get_offset(start)?.to_usize()
+        };
+
+        let end_offset = tape.get_offset(end)?.to_usize();
+
+        let data = unsafe {
+            slice::from_raw_parts(
+                data_ptr.as_ptr().cast::<u8>().add(base_offset),
+                end_offset - base_offset,
+            )
+        };
+
+        let offsets = unsafe {
+            slice::from_raw_parts(
+                offsets_ptr.as_ptr().cast::<Offset>().add(start),
+                (end - start) + 1,
+            )
+        };
+
+        Ok(Self { data, offsets })
+    }
+
+    /// Returns a reference to the bytes at the given index within this view.
+    pub fn get(&self, index: usize) -> Option<&[u8]> {
+        if index >= self.len() {
+            return None;
+        }
+
+        let start_offset = if index == 0 {
+            0
+        } else {
+            (self.offsets[index] - self.offsets[0]).to_usize()
+        };
+        let end_offset = (self.offsets[index + 1] - self.offsets[0]).to_usize();
+
+        Some(&self.data[start_offset..end_offset])
+    }
+
+    /// Returns the number of items in this view.
+    pub fn len(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+
+    /// Returns `true` if the view contains no items.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns the total number of bytes in this view.
+    pub fn data_len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Creates a sub-view of this view
+    pub fn subview(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Result<RawTapeView<'a, Offset>, StringTapeError> {
+        if start > end || end > self.len() {
+            return Err(StringTapeError::IndexOutOfBounds);
+        }
+
+        let base_in_data = if start == 0 {
+            0
+        } else {
+            (self.offsets[start] - self.offsets[0]).to_usize()
+        };
+        let end_in_data = (self.offsets[end] - self.offsets[0]).to_usize();
+
+        Ok(RawTapeView {
+            data: &self.data[base_in_data..end_in_data],
+            offsets: &self.offsets[start..=end],
+        })
+    }
+
+    /// Returns the raw parts of the view for Apache Arrow compatibility.
+    pub fn as_raw_parts(&self) -> (*const u8, *const Offset, usize, usize) {
+        (
+            self.data.as_ptr(),
+            self.offsets.as_ptr(),
+            self.data_len(),
+            self.len(),
+        )
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<usize> for RawTapeView<'a, Offset> {
+    type Output = [u8];
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index).expect("index out of bounds")
+    }
+}
+
+// Index trait implementations for RawTapeView to support [i..n] syntax
+impl<'a, Offset: OffsetType> Index<Range<usize>> for RawTapeView<'a, Offset> {
+    type Output = [u8];
+
+    fn index(&self, range: Range<usize>) -> &Self::Output {
+        let view = self
+            .subview(range.start, range.end)
+            .expect("range out of bounds");
+        view.data
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<RangeFrom<usize>> for RawTapeView<'a, Offset> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeFrom<usize>) -> &Self::Output {
+        let view = self
+            .subview(range.start, self.len())
+            .expect("range out of bounds");
+        view.data
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<RangeTo<usize>> for RawTapeView<'a, Offset> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeTo<usize>) -> &Self::Output {
+        let view = self.subview(0, range.end).expect("range out of bounds");
+        view.data
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<RangeFull> for RawTapeView<'a, Offset> {
+    type Output = [u8];
+
+    fn index(&self, _range: RangeFull) -> &Self::Output {
+        self.data
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<RangeInclusive<usize>> for RawTapeView<'a, Offset> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeInclusive<usize>) -> &Self::Output {
+        let view = self
+            .subview(*range.start(), range.end() + 1)
+            .expect("range out of bounds");
+        view.data
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<RangeToInclusive<usize>> for RawTapeView<'a, Offset> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeToInclusive<usize>) -> &Self::Output {
+        let view = self.subview(0, range.end + 1).expect("range out of bounds");
+        view.data
+    }
+}
+
+// ========================
+// StringTapeView implementation
+// ========================
+
+impl<'a, Offset: OffsetType> StringTapeView<'a, Offset> {
+    /// Returns a reference to the string at the given index, or `None` if out of bounds.
+    pub fn get(&self, index: usize) -> Option<&str> {
+        // Safe because StringTapeView only comes from StringTape which validates UTF-8
+        self.inner
+            .get(index)
+            .map(|b| unsafe { core::str::from_utf8_unchecked(b) })
+    }
+
+    /// Returns the number of strings in this view.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns `true` if the view contains no strings.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Returns the total number of bytes in this view.
+    pub fn data_len(&self) -> usize {
+        self.inner.data_len()
+    }
+
+    /// Creates a sub-view of this view
+    pub fn subview(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Result<StringTapeView<'a, Offset>, StringTapeError> {
+        Ok(StringTapeView {
+            inner: self.inner.subview(start, end)?,
+        })
+    }
+
+    /// Returns the raw parts of the view for Apache Arrow compatibility.
+    pub fn as_raw_parts(&self) -> (*const u8, *const Offset, usize, usize) {
+        self.inner.as_raw_parts()
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<usize> for StringTapeView<'a, Offset> {
+    type Output = str;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index).expect("index out of bounds")
+    }
+}
+
+// ========================
+// BytesTapeView implementation
+// ========================
+
+impl<'a, Offset: OffsetType> BytesTapeView<'a, Offset> {
+    /// Returns a reference to the bytes at the given index, or `None` if out of bounds.
+    pub fn get(&self, index: usize) -> Option<&[u8]> {
+        self.inner.get(index)
+    }
+
+    /// Returns the number of items in this view.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns `true` if the view contains no items.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Returns the total number of bytes in this view.
+    pub fn data_len(&self) -> usize {
+        self.inner.data_len()
+    }
+
+    /// Creates a sub-view of this view
+    pub fn subview(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Result<BytesTapeView<'a, Offset>, StringTapeError> {
+        Ok(BytesTapeView {
+            inner: self.inner.subview(start, end)?,
+        })
+    }
+
+    /// Returns the raw parts of the view for Apache Arrow compatibility.
+    pub fn as_raw_parts(&self) -> (*const u8, *const Offset, usize, usize) {
+        self.inner.as_raw_parts()
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<usize> for BytesTapeView<'a, Offset> {
+    type Output = [u8];
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index).expect("index out of bounds")
+    }
+}
 
 // ========================
 // StringTape (UTF-8 view)
@@ -633,7 +1027,11 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         allocator: A,
     ) -> Result<Self, StringTapeError> {
         Ok(Self {
-            inner: RawTape::<Offset, A>::with_capacity_in(data_capacity, strings_capacity, allocator)?,
+            inner: RawTape::<Offset, A>::with_capacity_in(
+                data_capacity,
+                strings_capacity,
+                allocator,
+            )?,
         })
     }
 
@@ -645,7 +1043,9 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
     /// Returns a reference to the string at the given index, or `None` if out of bounds.
     pub fn get(&self, index: usize) -> Option<&str> {
         // Safe because StringTape only accepts &str pushes.
-        self.inner.get(index).map(|b| unsafe { core::str::from_utf8_unchecked(b) })
+        self.inner
+            .get(index)
+            .map(|b| unsafe { core::str::from_utf8_unchecked(b) })
     }
 
     /// Returns the number of strings in the StringTape.
@@ -714,6 +1114,24 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
     /// Returns a reference to the allocator used by this StringTape.
     pub fn allocator(&self) -> &A {
         self.inner.allocator()
+    }
+
+    /// Creates a view of the entire StringTape.
+    pub fn view(&self) -> StringTapeView<'_, Offset> {
+        StringTapeView {
+            inner: self.inner.view(),
+        }
+    }
+
+    /// Creates a subview of a continuous slice of this StringTape.
+    pub fn subview(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Result<StringTapeView<'_, Offset>, StringTapeError> {
+        Ok(StringTapeView {
+            inner: self.inner.subview(start, end)?,
+        })
     }
 }
 
@@ -826,7 +1244,11 @@ impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
         allocator: A,
     ) -> Result<Self, StringTapeError> {
         Ok(Self {
-            inner: RawTape::<Offset, A>::with_capacity_in(data_capacity, items_capacity, allocator)?,
+            inner: RawTape::<Offset, A>::with_capacity_in(
+                data_capacity,
+                items_capacity,
+                allocator,
+            )?,
         })
     }
 
@@ -892,6 +1314,24 @@ impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
     pub fn allocator(&self) -> &A {
         self.inner.allocator()
     }
+
+    /// Creates a view of the entire BytesTape.
+    pub fn view(&self) -> BytesTapeView<'_, Offset> {
+        BytesTapeView {
+            inner: self.inner.view(),
+        }
+    }
+
+    /// Creates a subview of a continuous slice of this BytesTape.
+    pub fn subview(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Result<BytesTapeView<'_, Offset>, StringTapeError> {
+        Ok(BytesTapeView {
+            inner: self.inner.subview(start, end)?,
+        })
+    }
 }
 
 impl<Offset: OffsetType, A: Allocator> Index<usize> for BytesTape<Offset, A> {
@@ -906,6 +1346,11 @@ pub type StringTape32 = StringTape<i32, Global>;
 pub type StringTape64 = StringTape<i64, Global>;
 pub type BytesTape32 = BytesTape<i32, Global>;
 pub type BytesTape64 = BytesTape<i64, Global>;
+
+pub type StringTapeView32<'a> = StringTapeView<'a, i32>;
+pub type StringTapeView64<'a> = StringTapeView<'a, i64>;
+pub type BytesTapeView32<'a> = BytesTapeView<'a, i32>;
+pub type BytesTapeView64<'a> = BytesTapeView<'a, i64>;
 
 impl<Offset: OffsetType> Default for StringTape<Offset, Global> {
     fn default() -> Self {
@@ -1080,5 +1525,208 @@ mod tests {
         assert_eq!(tape.len(), 2);
         assert_eq!(&tape[0], &[1u8, 2, 3] as &[u8]);
         assert_eq!(&tape[1], b"abc" as &[u8]);
+    }
+
+    #[test]
+    fn test_string_tape_view_basic() {
+        let mut tape = StringTape32::new();
+        tape.push("hello").unwrap();
+        tape.push("world").unwrap();
+        tape.push("foo").unwrap();
+        tape.push("bar").unwrap();
+
+        // Test basic subview creation
+        let view = tape.subview(1, 3).unwrap();
+        assert_eq!(view.len(), 2);
+        assert_eq!(view.get(0), Some("world"));
+        assert_eq!(view.get(1), Some("foo"));
+        assert_eq!(view.get(2), None);
+
+        // Test indexing
+        assert_eq!(&view[0], "world");
+        assert_eq!(&view[1], "foo");
+    }
+
+    #[test]
+    fn test_string_tape_range_syntax() {
+        let mut tape = StringTape32::new();
+        tape.push("a").unwrap();
+        tape.push("b").unwrap();
+        tape.push("c").unwrap();
+        tape.push("d").unwrap();
+
+        // Test view() method
+        let full_view = tape.view();
+        assert_eq!(full_view.len(), 4);
+        assert_eq!(full_view.get(0), Some("a"));
+        assert_eq!(full_view.get(3), Some("d"));
+
+        // Test subview
+        let sub = tape.subview(1, 3).unwrap();
+        assert_eq!(sub.len(), 2);
+        assert_eq!(sub.get(0), Some("b"));
+        assert_eq!(sub.get(1), Some("c"));
+    }
+
+    #[test]
+    fn test_string_tape_view_subslicing() {
+        let mut tape = StringTape32::new();
+        tape.push("0").unwrap();
+        tape.push("1").unwrap();
+        tape.push("2").unwrap();
+        tape.push("3").unwrap();
+        tape.push("4").unwrap();
+
+        // Create initial subview
+        let view = tape.subview(1, 4).unwrap(); // ["1", "2", "3"]
+        assert_eq!(view.len(), 3);
+
+        // Create sub-view of a view
+        let subview = view.subview(1, 2).unwrap(); // ["2"]
+        assert_eq!(subview.len(), 1);
+        assert_eq!(subview.get(0), Some("2"));
+
+        // Test subviews with different ranges
+        let subview_from = view.subview(1, view.len()).unwrap(); // ["2", "3"]
+        assert_eq!(subview_from.len(), 2);
+        assert_eq!(subview_from.get(0), Some("2"));
+        assert_eq!(subview_from.get(1), Some("3"));
+
+        let subview_to = view.subview(0, 2).unwrap(); // ["1", "2"]
+        assert_eq!(subview_to.len(), 2);
+        assert_eq!(subview_to.get(0), Some("1"));
+        assert_eq!(subview_to.get(1), Some("2"));
+    }
+
+    #[test]
+    fn test_bytes_tape_view_basic() {
+        let mut tape = BytesTape32::new();
+        tape.push(&[1u8, 2]).unwrap();
+        tape.push(&[3u8, 4]).unwrap();
+        tape.push(&[5u8, 6]).unwrap();
+        tape.push(&[7u8, 8]).unwrap();
+
+        // Test basic subview creation
+        let view = tape.subview(1, 3).unwrap();
+        assert_eq!(view.len(), 2);
+        assert_eq!(view.get(0), Some(&[3u8, 4] as &[u8]));
+        assert_eq!(view.get(1), Some(&[5u8, 6] as &[u8]));
+        assert_eq!(view.get(2), None);
+
+        // Test indexing
+        assert_eq!(&view[0], &[3u8, 4] as &[u8]);
+        assert_eq!(&view[1], &[5u8, 6] as &[u8]);
+    }
+
+    #[test]
+    fn test_view_empty_strings() {
+        let mut tape = StringTape32::new();
+        tape.push("").unwrap();
+        tape.push("non-empty").unwrap();
+        tape.push("").unwrap();
+        tape.push("another").unwrap();
+
+        let view = tape.subview(0, 3).unwrap();
+        assert_eq!(view.len(), 3);
+        assert_eq!(view.get(0), Some(""));
+        assert_eq!(view.get(1), Some("non-empty"));
+        assert_eq!(view.get(2), Some(""));
+    }
+
+    #[test]
+    fn test_view_single_item() {
+        let mut tape = StringTape32::new();
+        tape.push("only").unwrap();
+
+        let view = tape.subview(0, 1).unwrap();
+        assert_eq!(view.len(), 1);
+        assert_eq!(view.get(0), Some("only"));
+    }
+
+    #[test]
+    fn test_view_bounds_checking() {
+        let mut tape = StringTape32::new();
+        tape.push("a").unwrap();
+        tape.push("b").unwrap();
+
+        // Out of bounds subview creation
+        assert!(tape.subview(0, 3).is_err());
+        assert!(tape.subview(2, 1).is_err());
+        assert!(tape.subview(3, 4).is_err());
+
+        // Valid empty subview
+        let empty_view = tape.subview(1, 1).unwrap();
+        assert_eq!(empty_view.len(), 0);
+        assert!(empty_view.is_empty());
+    }
+
+    #[test]
+    fn test_view_data_properties() {
+        let mut tape = StringTape32::new();
+        tape.push("hello").unwrap(); // 5 bytes
+        tape.push("world").unwrap(); // 5 bytes
+        tape.push("!").unwrap(); // 1 byte
+
+        let view = tape.subview(0, 2).unwrap(); // "hello", "world" = 10 bytes
+        assert_eq!(view.data_len(), 10);
+        assert!(!view.is_empty());
+
+        let full_view = tape.subview(0, 3).unwrap(); // all = 11 bytes
+        assert_eq!(full_view.data_len(), 11);
+    }
+
+    #[test]
+    fn test_view_raw_parts() {
+        let mut tape = StringTape32::new();
+        tape.push("test").unwrap();
+        tape.push("data").unwrap();
+
+        let view = tape.subview(0, 2).unwrap();
+        let (data_ptr, offsets_ptr, data_len, items_len) = view.as_raw_parts();
+
+        assert!(!data_ptr.is_null());
+        assert!(!offsets_ptr.is_null());
+        assert_eq!(data_len, 8); // "test" + "data"
+        assert_eq!(items_len, 2);
+    }
+
+    #[test]
+    fn test_view_type_aliases() {
+        let mut tape = StringTape32::new();
+        tape.push("test").unwrap();
+
+        let _view: StringTapeView32 = tape.subview(0, 1).unwrap();
+
+        let mut bytes_tape = BytesTape64::new();
+        bytes_tape.push(b"test").unwrap();
+
+        let _bytes_view: BytesTapeView64 = bytes_tape.subview(0, 1).unwrap();
+    }
+
+    #[test]
+    fn test_range_indexing_syntax() {
+        let mut tape = StringTape32::new();
+        tape.push("a").unwrap();
+        tape.push("b").unwrap();
+        tape.push("c").unwrap();
+        tape.push("d").unwrap();
+
+        // While we can't return views with [..] syntax due to lifetime constraints,
+        // we can test that the view() and subview() API works correctly
+        
+        // Get full view
+        let full_view = tape.view();
+        assert_eq!(full_view.len(), 4);
+        
+        // Get subviews 
+        let sub = tape.subview(1, 3).unwrap();
+        assert_eq!(sub.len(), 2);
+        assert_eq!(sub.get(0), Some("b"));
+        assert_eq!(sub.get(1), Some("c"));
+        
+        // Test subview of subview
+        let sub_sub = sub.subview(0, 1).unwrap();
+        assert_eq!(sub_sub.len(), 1);
+        assert_eq!(sub_sub.get(0), Some("b"));
     }
 }

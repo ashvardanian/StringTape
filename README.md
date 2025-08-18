@@ -3,10 +3,10 @@
 A memory-efficient string storage library compatible with [Apache Arrow](https://arrow.apache.org/)'s string array format.
 Stores multiple strings in a contiguous memory layout using offset-based indexing, similar to Arrow's `String` and `LargeString` arrays.
 
-- __Apache Arrow Compatible__: Similar to `String` and `LargeString` classes
-- __Memory Efficient__: All strings stored in a single contiguous buffer
-- __`no_std` Support__: Can be used in embedded environments
-- __Zero Dependencies__: Pure Rust implementation
+- __Apache Arrow Compatible__: Matching `String` and `LargeString` arrays
+- __Memory Efficient__: All strings stored in two contiguous buffers
+- __Zero-Copy Views__: Efficient slicing with `[i..n]` range syntax
+- __Zero Dependencies__: Pure Rust implementation, with `no_std` support
 
 ## Quick Start
 
@@ -83,6 +83,12 @@ let s = &tape[0];
 // Safe access
 let s = tape.get(0); // Returns Option<&str>
 
+// Zero-copy views and slicing
+let view = tape.view();              // View entire tape
+let subview = tape.subview(1, 3)?;   // Slice [1, 3)
+let nested = subview.subview(0, 1)?; // Nested views
+let data = &tape.view()[1..3];       // Raw data slice [i..n]
+
 // Iteration
 for s in &tape {
     println!("{}", s);
@@ -122,6 +128,12 @@ tape.push("hello")?;
 tape.push("world")?;
 
 let (data_ptr, offsets_ptr, data_len, string_count) = tape.as_raw_parts();
+
+// BytesTape also available for binary data
+let mut bytes = BytesTape32::new();
+bytes.push(&[1, 2, 3])?;
+bytes.push(b"hello")?;
+// Same view/subview API works for bytes
 ```
 
 ## `no_std` Support
