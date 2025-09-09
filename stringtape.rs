@@ -5,9 +5,9 @@
 //! Memory-efficient string and bytes storage compatible with Apache Arrow.
 //!
 //! ```rust
-//! use stringtape::{StringTape32, StringTapeError};
+//! use stringtape::{StringTapeI32, StringTapeError};
 //!
-//! let mut tape = StringTape32::new();
+//! let mut tape = StringTapeI32::new();
 //! tape.push("hello")?;
 //! tape.push("world")?;
 //!
@@ -24,9 +24,9 @@
 //! It also supports binary data via `BytesTape`:
 //!
 //! ```rust
-//! use stringtape::{BytesTape32, StringTapeError};
+//! use stringtape::{BytesTapeI32, StringTapeError};
 //!
-//! let mut tape = BytesTape32::new();
+//! let mut tape = BytesTapeI32::new();
 //! tape.push(&[0xde, 0xad, 0xbe, 0xef])?;
 //! tape.push(b"bytes")?;
 //!
@@ -58,7 +58,7 @@ use allocator_api2::alloc::{Allocator, Global, Layout};
 pub enum StringTapeError {
     /// The string data size exceeds the maximum value representable by the offset type.
     ///
-    /// This can happen when using 32-bit offsets (`StringTape32`) and the total data
+    /// This can happen when using 32-bit offsets (`StringTapeI32`) and the total data
     /// exceeds 2GB, or when memory allocation fails.
     OffsetOverflow,
     /// Memory allocation failed.
@@ -88,16 +88,16 @@ impl std::error::Error for StringTapeError {}
 ///
 /// # Type Parameters
 ///
-/// * `Offset` - The offset type used for indexing (`i32` for StringTape32, `i64` for StringTape64)
+/// * `Offset` - The offset type used for indexing (`i32` for StringTapeI32, `i64` for StringTapeI64)
 /// * `A` - The allocator type (must implement `Allocator`). Defaults to `Global`.
 ///
 /// # Examples
 ///
 /// ```rust
-/// use stringtape::{StringTape32, StringTapeError};
+/// use stringtape::{StringTapeI32, StringTapeError};
 ///
 /// // Create a new StringTape with i32 offsets and global allocator
-/// let mut tape = StringTape32::new();
+/// let mut tape = StringTapeI32::new();
 /// tape.push("hello")?;
 /// tape.push("world")?;
 ///
@@ -166,7 +166,8 @@ pub struct BytesTapeView<'a, Offset: OffsetType = i32> {
 ///
 /// This trait defines the interface for offset types that can be used to index
 /// into the string data buffer. Implementations are provided for `i32` and `i64`
-/// to match Apache Arrow's String and LargeString array types.
+/// to match Apache Arrow's String and LargeString array types, and for `u32` and
+/// `u64` when unsigned offsets are desired (note: Arrow interop is i32/i64-only).
 pub trait OffsetType: Copy + Default + PartialOrd + Sub<Output = Self> {
     /// Size of the offset type in bytes.
     const SIZE: usize;
@@ -208,6 +209,34 @@ impl OffsetType for i64 {
     }
 }
 
+impl OffsetType for u32 {
+    const SIZE: usize = 4;
+
+    fn from_usize(value: usize) -> Option<Self> {
+        if value <= u32::MAX as usize {
+            Some(value as u32)
+        } else {
+            None
+        }
+    }
+
+    fn to_usize(self) -> usize {
+        self as usize
+    }
+}
+
+impl OffsetType for u64 {
+    const SIZE: usize = 8;
+
+    fn from_usize(value: usize) -> Option<Self> {
+        Some(value as u64)
+    }
+
+    fn to_usize(self) -> usize {
+        self as usize
+    }
+}
+
 impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
     /// Creates a new, empty StringTape with the global allocator.
     ///
@@ -216,9 +245,9 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::StringTape32;
+    /// use stringtape::StringTapeI32;
     ///
-    /// let tape = StringTape32::new();
+    /// let tape = StringTapeI32::new();
     /// assert!(tape.is_empty());
     /// assert_eq!(tape.len(), 0);
     /// ```
@@ -264,10 +293,10 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::{StringTape32, StringTapeError};
+    /// use stringtape::{StringTapeI32, StringTapeError};
     ///
     /// // Pre-allocate space for ~1KB of string data and 100 strings
-    /// let tape = StringTape32::with_capacity(1024, 100)?;
+    /// let tape = StringTapeI32::with_capacity(1024, 100)?;
     /// assert_eq!(tape.data_capacity(), 1024);
     /// # Ok::<(), StringTapeError>(())
     /// ```
@@ -402,9 +431,9 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::{BytesTape32, StringTapeError};
+    /// use stringtape::{BytesTapeI32, StringTapeError};
     ///
-    /// let mut tape = BytesTape32::new();
+    /// let mut tape = BytesTapeI32::new();
     /// tape.push(b"hello")?;
     /// tape.push(&[1, 2, 3])?;
     /// assert_eq!(tape.len(), 2);
@@ -503,6 +532,7 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
     }
 
     /// Returns the number of items currently stored (same as `len()`).
+    #[allow(dead_code)]
     pub fn capacity(&self) -> usize {
         self.len_items
     }
@@ -513,7 +543,7 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
     }
 
     /// Returns the number of offset slots allocated.
-    fn offsets_capacity(&self) -> usize {
+    pub fn offsets_capacity(&self) -> usize {
         self.offsets.map(|ptr| ptr.len()).unwrap_or(0)
     }
 
@@ -551,9 +581,9 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::{BytesTape32, StringTapeError};
+    /// use stringtape::{BytesTapeI32, StringTapeError};
     ///
-    /// let mut tape = BytesTape32::new();
+    /// let mut tape = BytesTapeI32::new();
     /// tape.extend([b"hello".as_slice(), b"world".as_slice()])?;
     /// assert_eq!(tape.len(), 2);
     /// # Ok::<(), StringTapeError>(())
@@ -745,7 +775,7 @@ impl<Offset: OffsetType, A: Allocator> Index<RangeToInclusive<usize>> for RawTap
 
 impl<'a, Offset: OffsetType> RawTapeView<'a, Offset> {
     /// Creates a view into a slice of the RawTape from start to end (exclusive).
-    pub fn new<A: Allocator>(
+    pub(crate) fn new<A: Allocator>(
         tape: &'a RawTape<Offset, A>,
         start: usize,
         end: usize,
@@ -1143,7 +1173,8 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         self.inner.data_capacity()
     }
 
-    fn offsets_capacity(&self) -> usize {
+    /// Returns the number of offset slots allocated.
+    pub fn offsets_capacity(&self) -> usize {
         self.inner.offsets_capacity()
     }
 
@@ -1367,7 +1398,8 @@ impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
         self.inner.data_capacity()
     }
 
-    fn offsets_capacity(&self) -> usize {
+    /// Returns the number of offset slots allocated.
+    pub fn offsets_capacity(&self) -> usize {
         self.inner.offsets_capacity()
     }
 
@@ -1442,15 +1474,27 @@ impl<Offset: OffsetType, A: Allocator> Index<usize> for BytesTape<Offset, A> {
     }
 }
 
-pub type StringTape32 = StringTape<i32, Global>;
-pub type StringTape64 = StringTape<i64, Global>;
-pub type BytesTape32 = BytesTape<i32, Global>;
-pub type BytesTape64 = BytesTape<i64, Global>;
+// Signed (Arrow-compatible) aliases
+pub type StringTapeI32 = StringTape<i32, Global>;
+pub type StringTapeI64 = StringTape<i64, Global>;
+pub type BytesTapeI32 = BytesTape<i32, Global>;
+pub type BytesTapeI64 = BytesTape<i64, Global>;
 
-pub type StringTapeView32<'a> = StringTapeView<'a, i32>;
-pub type StringTapeView64<'a> = StringTapeView<'a, i64>;
-pub type BytesTapeView32<'a> = BytesTapeView<'a, i32>;
-pub type BytesTapeView64<'a> = BytesTapeView<'a, i64>;
+pub type StringTapeViewI32<'a> = StringTapeView<'a, i32>;
+pub type StringTapeViewI64<'a> = StringTapeView<'a, i64>;
+pub type BytesTapeViewI32<'a> = BytesTapeView<'a, i32>;
+pub type BytesTapeViewI64<'a> = BytesTapeView<'a, i64>;
+
+// Unsigned aliases (not zero-copy with Arrow)
+pub type StringTapeU32 = StringTape<u32, Global>;
+pub type StringTapeU64 = StringTape<u64, Global>;
+pub type BytesTapeU32 = BytesTape<u32, Global>;
+pub type BytesTapeU64 = BytesTape<u64, Global>;
+
+pub type StringTapeViewU32<'a> = StringTapeView<'a, u32>;
+pub type StringTapeViewU64<'a> = StringTapeView<'a, u64>;
+pub type BytesTapeViewU32<'a> = BytesTapeView<'a, u32>;
+pub type BytesTapeViewU64<'a> = BytesTapeView<'a, u64>;
 
 impl<Offset: OffsetType> Default for StringTape<Offset, Global> {
     fn default() -> Self {
@@ -1466,8 +1510,8 @@ mod tests {
     use alloc::vec;
 
     #[test]
-    fn test_basic_operations() {
-        let mut tape = StringTape32::new();
+    fn basic_operations() {
+        let mut tape = StringTapeI32::new();
         assert!(tape.is_empty());
 
         tape.push("hello").unwrap();
@@ -1482,15 +1526,34 @@ mod tests {
     }
 
     #[test]
-    fn test_64bit_offsets() {
-        let mut tape = StringTape64::new();
+    fn unsigned_basic_operations() {
+        // u32
+        let mut t32 = StringTapeU32::new();
+        t32.push("hello").unwrap();
+        t32.push("world").unwrap();
+        assert_eq!(t32.len(), 2);
+        assert_eq!(t32.get(0), Some("hello"));
+        assert_eq!(t32.get(1), Some("world"));
+
+        // u64
+        let mut t64 = StringTapeU64::new();
+        t64.extend(["a", "", "bbb"]).unwrap();
+        assert_eq!(t64.len(), 3);
+        assert_eq!(t64.get(0), Some("a"));
+        assert_eq!(t64.get(1), Some(""));
+        assert_eq!(t64.get(2), Some("bbb"));
+    }
+
+    #[test]
+    fn offsets_64bit() {
+        let mut tape = StringTapeI64::new();
         tape.push("test").unwrap();
         assert_eq!(tape.get(0), Some("test"));
     }
 
     #[test]
-    fn test_iterator() {
-        let mut tape = StringTape32::new();
+    fn iterator_basics() {
+        let mut tape = StringTapeI32::new();
         tape.push("a").unwrap();
         tape.push("b").unwrap();
         tape.push("c").unwrap();
@@ -1500,8 +1563,8 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_strings() {
-        let mut tape = StringTape32::new();
+    fn empty_strings() {
+        let mut tape = StringTapeI32::new();
         tape.push("").unwrap();
         tape.push("non-empty").unwrap();
         tape.push("").unwrap();
@@ -1513,8 +1576,8 @@ mod tests {
     }
 
     #[test]
-    fn test_index_trait() {
-        let mut tape = StringTape32::new();
+    fn index_trait() {
+        let mut tape = StringTapeI32::new();
         tape.push("hello").unwrap();
         tape.push("world").unwrap();
 
@@ -1523,8 +1586,8 @@ mod tests {
     }
 
     #[test]
-    fn test_into_iterator() {
-        let mut tape = StringTape32::new();
+    fn into_iterator() {
+        let mut tape = StringTapeI32::new();
         tape.push("a").unwrap();
         tape.push("b").unwrap();
         tape.push("c").unwrap();
@@ -1541,9 +1604,9 @@ mod tests {
     }
 
     #[test]
-    fn test_from_iterator() {
+    fn from_iterator() {
         let strings = vec!["hello", "world", "test"];
-        let tape: StringTape32 = strings.into_iter().collect();
+        let tape: StringTapeI32 = strings.into_iter().collect();
 
         assert_eq!(tape.len(), 3);
         assert_eq!(tape.get(0), Some("hello"));
@@ -1552,8 +1615,19 @@ mod tests {
     }
 
     #[test]
-    fn test_extend() {
-        let mut tape = StringTape32::new();
+    fn from_iterator_unsigned() {
+        let strings = vec!["hello", "world", "test"];
+        let tape_u32: StringTapeU32 = strings.clone().into_iter().collect();
+        let tape_u64: StringTapeU64 = strings.clone().into_iter().collect();
+        assert_eq!(tape_u32.len(), 3);
+        assert_eq!(tape_u64.len(), 3);
+        assert_eq!(tape_u32.get(1), Some("world"));
+        assert_eq!(tape_u64.get(2), Some("test"));
+    }
+
+    #[test]
+    fn extend() {
+        let mut tape = StringTapeI32::new();
         tape.push("initial").unwrap();
 
         let additional = vec!["hello", "world"];
@@ -1566,8 +1640,8 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_and_truncate() {
-        let mut tape = StringTape32::new();
+    fn clear_and_truncate() {
+        let mut tape = StringTapeI32::new();
         tape.push("a").unwrap();
         tape.push("b").unwrap();
         tape.push("c").unwrap();
@@ -1586,14 +1660,27 @@ mod tests {
     }
 
     #[test]
-    fn test_capacity() {
-        let tape = StringTape32::with_capacity(100, 10).unwrap();
+    fn unsigned_views_and_subviews() {
+        let mut tape = StringTapeU32::new();
+        tape.extend(["0", "1", "22", "333"]).unwrap();
+        let view = tape.subview(1, 4).unwrap();
+        assert_eq!(view.len(), 3);
+        assert_eq!(view.get(0), Some("1"));
+        assert_eq!(view.get(2), Some("333"));
+        let sub = view.subview(1, 2).unwrap();
+        assert_eq!(sub.len(), 1);
+        assert_eq!(sub.get(0), Some("22"));
+    }
+
+    #[test]
+    fn capacity() {
+        let tape = StringTapeI32::with_capacity(100, 10).unwrap();
         assert_eq!(tape.data_capacity(), 100);
         assert_eq!(tape.capacity(), 0); // No strings added yet
     }
 
     #[test]
-    fn test_custom_allocator() {
+    fn custom_allocator() {
         // Using the Global allocator explicitly
         let mut tape: StringTape<i32, Global> = StringTape::new_in(Global);
 
@@ -1609,7 +1696,7 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_allocator_with_capacity() {
+    fn custom_allocator_with_capacity() {
         let tape: StringTape<i64, Global> = StringTape::with_capacity_in(256, 50, Global).unwrap();
 
         assert_eq!(tape.data_capacity(), 256);
@@ -1617,8 +1704,8 @@ mod tests {
     }
 
     #[test]
-    fn test_bytes_tape_basic() {
-        let mut tape = BytesTape32::new();
+    fn bytes_tape_basic() {
+        let mut tape = BytesTapeI32::new();
         tape.push(&[1, 2, 3]).unwrap();
         tape.push(b"abc").unwrap();
 
@@ -1628,8 +1715,18 @@ mod tests {
     }
 
     #[test]
-    fn test_string_tape_view_basic() {
-        let mut tape = StringTape32::new();
+    fn unsigned_bytes_tape_basic() {
+        let mut tape = BytesTapeU64::new();
+        tape.push(&[1u8, 2]).unwrap();
+        tape.push(&[3u8, 4, 5]).unwrap();
+        assert_eq!(tape.len(), 2);
+        assert_eq!(&tape[0], &[1u8, 2] as &[u8]);
+        assert_eq!(&tape[1], &[3u8, 4, 5] as &[u8]);
+    }
+
+    #[test]
+    fn string_tape_view_basic() {
+        let mut tape = StringTapeI32::new();
         tape.push("hello").unwrap();
         tape.push("world").unwrap();
         tape.push("foo").unwrap();
@@ -1648,8 +1745,8 @@ mod tests {
     }
 
     #[test]
-    fn test_string_tape_range_syntax() {
-        let mut tape = StringTape32::new();
+    fn string_tape_range_syntax() {
+        let mut tape = StringTapeI32::new();
         tape.push("a").unwrap();
         tape.push("b").unwrap();
         tape.push("c").unwrap();
@@ -1669,8 +1766,8 @@ mod tests {
     }
 
     #[test]
-    fn test_string_tape_view_subslicing() {
-        let mut tape = StringTape32::new();
+    fn string_tape_view_subslicing() {
+        let mut tape = StringTapeI32::new();
         tape.push("0").unwrap();
         tape.push("1").unwrap();
         tape.push("2").unwrap();
@@ -1699,8 +1796,8 @@ mod tests {
     }
 
     #[test]
-    fn test_bytes_tape_view_basic() {
-        let mut tape = BytesTape32::new();
+    fn bytes_tape_view_basic() {
+        let mut tape = BytesTapeI32::new();
         tape.push(&[1u8, 2]).unwrap();
         tape.push(&[3u8, 4]).unwrap();
         tape.push(&[5u8, 6]).unwrap();
@@ -1719,8 +1816,8 @@ mod tests {
     }
 
     #[test]
-    fn test_view_empty_strings() {
-        let mut tape = StringTape32::new();
+    fn view_empty_strings() {
+        let mut tape = StringTapeI32::new();
         tape.push("").unwrap();
         tape.push("non-empty").unwrap();
         tape.push("").unwrap();
@@ -1734,8 +1831,8 @@ mod tests {
     }
 
     #[test]
-    fn test_view_single_item() {
-        let mut tape = StringTape32::new();
+    fn view_single_item() {
+        let mut tape = StringTapeI32::new();
         tape.push("only").unwrap();
 
         let view = tape.subview(0, 1).unwrap();
@@ -1744,8 +1841,8 @@ mod tests {
     }
 
     #[test]
-    fn test_view_bounds_checking() {
-        let mut tape = StringTape32::new();
+    fn view_bounds_checking() {
+        let mut tape = StringTapeI32::new();
         tape.push("a").unwrap();
         tape.push("b").unwrap();
 
@@ -1761,8 +1858,8 @@ mod tests {
     }
 
     #[test]
-    fn test_view_data_properties() {
-        let mut tape = StringTape32::new();
+    fn view_data_properties() {
+        let mut tape = StringTapeI32::new();
         tape.push("hello").unwrap(); // 5 bytes
         tape.push("world").unwrap(); // 5 bytes
         tape.push("!").unwrap(); // 1 byte
@@ -1776,8 +1873,8 @@ mod tests {
     }
 
     #[test]
-    fn test_view_raw_parts() {
-        let mut tape = StringTape32::new();
+    fn view_raw_parts() {
+        let mut tape = StringTapeI32::new();
         tape.push("test").unwrap();
         tape.push("data").unwrap();
 
@@ -1791,21 +1888,47 @@ mod tests {
     }
 
     #[test]
-    fn test_view_type_aliases() {
-        let mut tape = StringTape32::new();
+    fn view_type_aliases() {
+        let mut tape = StringTapeI32::new();
         tape.push("test").unwrap();
 
-        let _view: StringTapeView32 = tape.subview(0, 1).unwrap();
+        let _view: StringTapeViewI32 = tape.subview(0, 1).unwrap();
 
-        let mut bytes_tape = BytesTape64::new();
+        let mut bytes_tape = BytesTapeI64::new();
         bytes_tape.push(b"test").unwrap();
 
-        let _bytes_view: BytesTapeView64 = bytes_tape.subview(0, 1).unwrap();
+        let _bytes_view: BytesTapeViewI64 = bytes_tape.subview(0, 1).unwrap();
     }
 
     #[test]
-    fn test_range_indexing_syntax() {
-        let mut tape = StringTape32::new();
+    fn build_i32_from_other_offset_iterators() {
+        let items = ["x", "yy", "", "zzz"];
+
+        // From u32 iterator
+        let mut u32t = StringTapeU32::new();
+        u32t.extend(items).unwrap();
+        let t_from_u32: StringTapeI32 = u32t.iter().collect();
+        assert_eq!(t_from_u32.len(), items.len());
+        assert_eq!(t_from_u32.get(1), Some("yy"));
+
+        // From u64 iterator
+        let mut u64t = StringTapeU64::new();
+        u64t.extend(items).unwrap();
+        let t_from_u64: StringTapeI32 = u64t.iter().collect();
+        assert_eq!(t_from_u64.len(), items.len());
+        assert_eq!(t_from_u64.get(3), Some("zzz"));
+
+        // From i64 iterator
+        let mut i64t = StringTapeI64::new();
+        i64t.extend(items).unwrap();
+        let t_from_i64: StringTapeI32 = i64t.iter().collect();
+        assert_eq!(t_from_i64.len(), items.len());
+        assert_eq!(t_from_i64.get(2), Some(""));
+    }
+
+    #[test]
+    fn range_indexing_syntax() {
+        let mut tape = StringTapeI32::new();
         tape.push("a").unwrap();
         tape.push("b").unwrap();
         tape.push("c").unwrap();
@@ -1836,8 +1959,8 @@ mod tests {
     use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
 
     #[test]
-    fn test_stringtape_to_arrow_string_array() {
-        let mut tape = StringTape32::new();
+    fn stringtape_to_arrow_string_array() {
+        let mut tape = StringTapeI32::new();
         tape.extend(["hello", "world", "", "arrow"]).unwrap();
 
         let (data_slice, offsets_slice) = tape.arrow_slices();
@@ -1855,12 +1978,12 @@ mod tests {
     }
 
     #[test]
-    fn test_arrow_string_array_to_stringtape_view() {
+    fn arrow_string_array_to_stringtape_view() {
         let arrow_array = StringArray::from(vec!["foo", "bar", ""]);
 
         // Zero-copy conversion to StringTapeView
         let view = unsafe {
-            StringTapeView32::from_raw_parts(arrow_array.values(), arrow_array.offsets().as_ref())
+            StringTapeViewI32::from_raw_parts(arrow_array.values(), arrow_array.offsets().as_ref())
         };
 
         assert_eq!(view.len(), 3);
@@ -1870,13 +1993,13 @@ mod tests {
     }
 
     #[test]
-    fn test_arrow_binary_array_to_bytestape_view() {
+    fn arrow_binary_array_to_bytestape_view() {
         let values: Vec<Option<&[u8]>> = vec![Some(&[1u8, 2, 3]), Some(&[]), Some(&[4u8, 5])];
         let arrow_array = BinaryArray::from(values);
 
         // Zero-copy conversion to BytesTapeView
         let view = unsafe {
-            BytesTapeView32::from_raw_parts(arrow_array.values(), arrow_array.offsets().as_ref())
+            BytesTapeViewI32::from_raw_parts(arrow_array.values(), arrow_array.offsets().as_ref())
         };
 
         assert_eq!(view.len(), 3);
@@ -1886,9 +2009,9 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_copy_roundtrip() {
+    fn zero_copy_roundtrip() {
         // Original data
-        let mut tape = StringTape32::new();
+        let mut tape = StringTapeI32::new();
         tape.extend(["hello", "", "world"]).unwrap();
 
         // Convert to Arrow (zero-copy)
@@ -1903,7 +2026,7 @@ mod tests {
 
         // Convert back to StringTapeView (zero-copy)
         let view = unsafe {
-            StringTapeView32::from_raw_parts(arrow_array.values(), arrow_array.offsets().as_ref())
+            StringTapeViewI32::from_raw_parts(arrow_array.values(), arrow_array.offsets().as_ref())
         };
 
         // Verify data integrity without any copying

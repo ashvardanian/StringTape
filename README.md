@@ -11,10 +11,10 @@ Stores multiple strings in a contiguous memory layout using offset-based indexin
 ## Quick Start
 
 ```rust
-use stringtape::{StringTape32, StringTapeError};
+use stringtape::{StringTapeI32, StringTapeError};
 
 // Create a new StringTape with 32-bit offsets
-let mut tape = StringTape32::new();
+let mut tape = StringTapeI32::new();
 tape.push("hello")?;
 tape.push("world")?;
 
@@ -28,7 +28,7 @@ for s in &tape {
 }
 
 // Build from iterator
-let tape2: StringTape32 = ["a", "b", "c"].into_iter().collect();
+let tape2: StringTapeI32 = ["a", "b", "c"].into_iter().collect();
 assert_eq!(tape2.len(), 3);
 # Ok::<(), StringTapeError>(())
 ```
@@ -47,9 +47,9 @@ Offset buffer:  [0, 5, 10]
 ### Basic Operations
 
 ```rust
-use stringtape::StringTape32;
+use stringtape::StringTapeI32;
 
-let mut tape = StringTape32::new();
+let mut tape = StringTapeI32::new();
 tape.push("hello")?;                    // Append one string
 tape.extend(["world", "foo"])?;         // Append an array
 assert_eq!(&tape[0], "hello");          // Direct indexing
@@ -60,7 +60,7 @@ for s in &tape { // Iterate
 }
 
 // Construct from an iterator
-let tape2: StringTape32 = ["a", "b", "c"].into_iter().collect();
+let tape2: StringTapeI32 = ["a", "b", "c"].into_iter().collect();
 ```
 
 ### Views and Slicing
@@ -80,7 +80,7 @@ assert_eq!(&subview[0], "world");
 
 ```rust
 // Pre-allocate capacity
-let tape = StringTape32::with_capacity(1024, 100)?; // 1KB data, 100 strings
+let tape = StringTapeI32::with_capacity(1024, 100)?; // 1KB data, 100 strings
 
 // Monitor usage
 println!("Items: {}, Data: {} bytes", tape.len(), tape.data_len());
@@ -109,12 +109,24 @@ let arrow_array = StringArray::new(offsets_buffer, data_buffer, None);
 
 // Arrow → StringTapeView (zero-copy)
 let view = unsafe {
-    StringTapeView32::from_raw_parts(
+    StringTapeViewI32::from_raw_parts(
         arrow_array.values(),
         arrow_array.offsets().as_ref(),
     )
 };
 ```
+
+### Unsigned Offsets
+
+In addition to the signed offsets (`i32`/`i64` via `StringTapeI32`/`StringTapeI64`),
+the library also supports unsigned offsets (`u32`/`u64`) when you prefer non-negative indexing:
+
+- `StringTapeU32`, `StringTapeU64`
+- `BytesTapeU32`, `BytesTapeU64`
+- `StringTapeViewU32<'_>`, `StringTapeViewU64<'_>`
+- `BytesTapeViewU32<'_>`, `BytesTapeViewU64<'_>`
+
+Note, that unsigned offsets cannot be converted to/from Arrow arrays.
 
 ## `no_std` Support
 
