@@ -133,6 +133,19 @@ struct RawTape<Offset: OffsetType, A: Allocator> {
     _phantom: PhantomData<Offset>,
 }
 
+/// Named raw parts returned by `as_raw_parts` methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawParts<Offset: OffsetType> {
+    /// Pointer to the start of the contiguous data buffer.
+    pub data_ptr: *const u8,
+    /// Pointer to the start of the offsets buffer.
+    pub offsets_ptr: *const Offset,
+    /// Number of bytes of valid data in `data_ptr`.
+    pub data_len: usize,
+    /// Number of items stored (strings/bytes entries).
+    pub items_count: usize,
+}
+
 /// UTF-8 string view over `RawTape`.
 pub struct StringTape<Offset: OffsetType = i32, A: Allocator = Global> {
     inner: RawTape<Offset, A>,
@@ -601,16 +614,16 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
 
     /// Returns the raw parts of the tape for Apache Arrow compatibility.
     ///
-    /// Returns a tuple of:
-    /// - Data buffer pointer
-    /// - Offsets buffer pointer  
-    /// - Data length in bytes
-    /// - Number of strings
+    /// Returns named fields:
+    /// - `data_ptr`: Data buffer pointer
+    /// - `offsets_ptr`: Offsets buffer pointer
+    /// - `data_len`: Data length in bytes
+    /// - `items_count`: Number of items
     ///
     /// # Safety
     ///
     /// The returned pointers are valid only as long as the StringTape is not modified.
-    pub fn as_raw_parts(&self) -> (*const u8, *const Offset, usize, usize) {
+    pub fn as_raw_parts(&self) -> RawParts<Offset> {
         let data_ptr = self
             .data
             .map(|ptr| ptr.as_ptr().cast::<u8>() as *const u8)
@@ -619,7 +632,12 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
             .offsets
             .map(|ptr| ptr.as_ptr().cast::<Offset>() as *const Offset)
             .unwrap_or(ptr::null());
-        (data_ptr, offsets_ptr, self.len_bytes, self.len_items)
+        RawParts {
+            data_ptr,
+            offsets_ptr,
+            data_len: self.len_bytes,
+            items_count: self.len_items,
+        }
     }
 
     /// Returns a slice view of the data buffer.
@@ -820,7 +838,7 @@ impl<'a, Offset: OffsetType> RawTapeView<'a, Offset> {
     ///
     /// The caller must ensure that:
     /// - `data` contains valid bytes for the lifetime `'a`
-    /// - `offsets` contains valid offsets with length `items_len + 1`
+    /// - `offsets` contains valid offsets with length `items_count + 1`
     /// - All offsets are within bounds of the data slice
     /// - For StringTapeView, data must be valid UTF-8
     pub unsafe fn from_raw_parts(data: &'a [u8], offsets: &'a [Offset]) -> Self {
@@ -882,13 +900,13 @@ impl<'a, Offset: OffsetType> RawTapeView<'a, Offset> {
     }
 
     /// Returns the raw parts of the view for Apache Arrow compatibility.
-    pub fn as_raw_parts(&self) -> (*const u8, *const Offset, usize, usize) {
-        (
-            self.data.as_ptr(),
-            self.offsets.as_ptr(),
-            self.data_len(),
-            self.len(),
-        )
+    pub fn as_raw_parts(&self) -> RawParts<Offset> {
+        RawParts {
+            data_ptr: self.data.as_ptr(),
+            offsets_ptr: self.offsets.as_ptr(),
+            data_len: self.data_len(),
+            items_count: self.len(),
+        }
     }
 }
 
@@ -1014,7 +1032,7 @@ impl<'a, Offset: OffsetType> StringTapeView<'a, Offset> {
     }
 
     /// Returns the raw parts of the view for Apache Arrow compatibility.
-    pub fn as_raw_parts(&self) -> (*const u8, *const Offset, usize, usize) {
+    pub fn as_raw_parts(&self) -> RawParts<Offset> {
         self.inner.as_raw_parts()
     }
 }
@@ -1078,7 +1096,7 @@ impl<'a, Offset: OffsetType> BytesTapeView<'a, Offset> {
     }
 
     /// Returns the raw parts of the view for Apache Arrow compatibility.
-    pub fn as_raw_parts(&self) -> (*const u8, *const Offset, usize, usize) {
+    pub fn as_raw_parts(&self) -> RawParts<Offset> {
         self.inner.as_raw_parts()
     }
 }
@@ -1201,7 +1219,7 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
     }
 
     /// Returns the raw parts of the StringTape for Apache Arrow compatibility.
-    pub fn as_raw_parts(&self) -> (*const u8, *const Offset, usize, usize) {
+    pub fn as_raw_parts(&self) -> RawParts<Offset> {
         self.inner.as_raw_parts()
     }
 
@@ -1423,7 +1441,7 @@ impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
     }
 
     /// Returns the raw parts of the tape for Apache Arrow compatibility.
-    pub fn as_raw_parts(&self) -> (*const u8, *const Offset, usize, usize) {
+    pub fn as_raw_parts(&self) -> RawParts<Offset> {
         self.inner.as_raw_parts()
     }
 
@@ -1879,12 +1897,12 @@ mod tests {
         tape.push("data").unwrap();
 
         let view = tape.subview(0, 2).unwrap();
-        let (data_ptr, offsets_ptr, data_len, items_len) = view.as_raw_parts();
+        let parts = view.as_raw_parts();
 
-        assert!(!data_ptr.is_null());
-        assert!(!offsets_ptr.is_null());
-        assert_eq!(data_len, 8); // "test" + "data"
-        assert_eq!(items_len, 2);
+        assert!(!parts.data_ptr.is_null());
+        assert!(!parts.offsets_ptr.is_null());
+        assert_eq!(parts.data_len, 8); // "test" + "data"
+        assert_eq!(parts.items_count, 2);
     }
 
     #[test]
