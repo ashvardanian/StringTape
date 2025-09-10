@@ -1569,6 +1569,49 @@ impl<Offset: OffsetType, A: Allocator> CharsTape<Offset, A> {
     }
 }
 
+// Conversion implementations between BytesTapeView and CharsTapeView
+impl<'a, Offset: OffsetType> TryFrom<BytesTapeView<'a, Offset>> for CharsTapeView<'a, Offset> {
+    type Error = StringTapeError;
+
+    fn try_from(bytes_view: BytesTapeView<'a, Offset>) -> Result<Self, Self::Error> {
+        // Validate that all byte sequences are valid UTF-8
+        for i in 0..bytes_view.len() {
+            let bytes = bytes_view.get(i).ok_or(StringTapeError::IndexOutOfBounds)?;
+            if core::str::from_utf8(bytes).is_err() {
+                return Err(StringTapeError::Utf8Error(
+                    core::str::from_utf8(bytes).unwrap_err(),
+                ));
+            }
+        }
+
+        // Since validation passed, construct a CharsTapeView over the same inner view
+        Ok(CharsTapeView {
+            inner: bytes_view.inner,
+        })
+    }
+}
+
+impl<'a, Offset: OffsetType> From<CharsTapeView<'a, Offset>> for BytesTapeView<'a, Offset> {
+    fn from(chars_view: CharsTapeView<'a, Offset>) -> Self {
+        // UTF-8 bytes can always be viewed as bytes
+        BytesTapeView {
+            inner: chars_view.inner,
+        }
+    }
+}
+
+impl<'a, Offset: OffsetType> BytesTapeView<'a, Offset> {
+    pub fn try_into_chars_view(self) -> Result<CharsTapeView<'a, Offset>, StringTapeError> {
+        self.try_into()
+    }
+}
+
+impl<'a, Offset: OffsetType> CharsTapeView<'a, Offset> {
+    pub fn into_bytes_view(self) -> BytesTapeView<'a, Offset> {
+        self.into()
+    }
+}
+
 impl<Offset: OffsetType> Default for CharsTape<Offset, Global> {
     fn default() -> Self {
         Self::new()
@@ -2203,6 +2246,47 @@ mod tests {
         assert_eq!(expected.len(), recovered.len());
         for (i, expected_str) in expected.iter().enumerate() {
             assert_eq!(recovered.get(i), Some(*expected_str));
+        }
+    }
+
+    #[test]
+    fn view_to_view_conversions_valid_utf8() {
+        // Prepare a CharsTape and obtain its view
+        let mut ct = CharsTapeI32::new();
+        ct.extend(["abc", "", "世界"]).unwrap();
+        let chars_view = ct.view();
+
+        // Chars -> Bytes view conversion is infallible
+        let bytes_view: BytesTapeViewI32 = chars_view.into_bytes_view();
+        assert_eq!(bytes_view.len(), 3);
+        assert_eq!(bytes_view.get(0), Some("abc".as_bytes()));
+        assert_eq!(bytes_view.get(1), Some(b"" as &[u8]));
+        assert_eq!(bytes_view.get(2), Some("世界".as_bytes()));
+
+        // Bytes -> Chars view conversion is fallible, but should succeed for valid UTF-8
+        let chars_back: Result<CharsTapeViewI32, _> = bytes_view.try_into_chars_view();
+        assert!(chars_back.is_ok());
+        let chars_back = chars_back.unwrap();
+        assert_eq!(chars_back.len(), 3);
+        assert_eq!(chars_back.get(0), Some("abc"));
+        assert_eq!(chars_back.get(1), Some(""));
+        assert_eq!(chars_back.get(2), Some("世界"));
+    }
+
+    #[test]
+    fn view_to_view_bytes_to_chars_invalid_utf8() {
+        // Prepare a BytesTape with invalid UTF-8 payload
+        let mut bt = BytesTapeI32::new();
+        bt.push(b"ok").unwrap();
+        bt.push(&[0xFF, 0xFE]).unwrap(); // invalid UTF-8
+        let bview = bt.view();
+
+        // Converting to CharsTapeView should fail
+        let res: Result<CharsTapeViewI32, _> = bview.try_into_chars_view();
+        assert!(res.is_err());
+        match res {
+            Err(StringTapeError::Utf8Error(_)) => {}
+            _ => panic!("Expected Utf8Error"),
         }
     }
 }
