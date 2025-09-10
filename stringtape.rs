@@ -5,9 +5,9 @@
 //! Memory-efficient string and bytes storage compatible with Apache Arrow.
 //!
 //! ```rust
-//! use stringtape::{StringTapeI32, StringTapeError};
+//! use stringtape::{CharsTapeI32, StringTapeError};
 //!
-//! let mut tape = StringTapeI32::new();
+//! let mut tape = CharsTapeI32::new();
 //! tape.push("hello")?;
 //! tape.push("world")?;
 //!
@@ -53,12 +53,12 @@ use alloc::{string::String, vec::Vec};
 
 use allocator_api2::alloc::{Allocator, Global, Layout};
 
-/// Errors that can occur when working with StringTape.
+/// Errors that can occur when working with tape classes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StringTapeError {
     /// The string data size exceeds the maximum value representable by the offset type.
     ///
-    /// This can happen when using 32-bit offsets (`StringTapeI32`) and the total data
+    /// This can happen when using 32-bit offsets (`CharsTapeI32`) and the total data
     /// exceeds 2GB, or when memory allocation fails.
     OffsetOverflow,
     /// Memory allocation failed.
@@ -85,22 +85,22 @@ impl std::error::Error for StringTapeError {}
 
 /// A memory-efficient string storage structure compatible with Apache Arrow.
 ///
-/// `StringTape` stores multiple strings in a contiguous memory layout using offset-based
+/// `CharsTape` stores multiple strings in a contiguous memory layout using offset-based
 /// indexing, similar to Apache Arrow's String and LargeString arrays. All string data
 /// is stored in a single buffer, with a separate offset array tracking string boundaries.
 ///
 /// # Type Parameters
 ///
-/// * `Offset` - The offset type used for indexing (`i32` for StringTapeI32, `i64` for StringTapeI64)
+/// * `Offset` - The offset type used for indexing (`i32` for CharsTapeI32, `i64` for CharsTapeI64)
 /// * `A` - The allocator type (must implement `Allocator`). Defaults to `Global`.
 ///
 /// # Examples
 ///
 /// ```rust
-/// use stringtape::{StringTapeI32, StringTapeError};
+/// use stringtape::{CharsTapeI32, StringTapeError};
 ///
-/// // Create a new StringTape with i32 offsets and global allocator
-/// let mut tape = StringTapeI32::new();
+/// // Create a new CharsTape with i32 offsets and global allocator
+/// let mut tape = CharsTapeI32::new();
 /// tape.push("hello")?;
 /// tape.push("world")?;
 ///
@@ -113,11 +113,11 @@ impl std::error::Error for StringTapeError {}
 /// # Custom Allocators
 ///
 /// ```rust,ignore
-/// use stringtape::StringTape;
+/// use stringtape::CharsTape;
 /// use allocator_api2::alloc::{Allocator, Global};
 ///
 /// // Use with the global allocator explicitly
-/// let tape: StringTape<i32, Global> = StringTape::new_in(Global);
+/// let tape: CharsTape<i32, Global> = CharsTape::new_in(Global);
 /// ```
 ///
 /// # Memory Layout
@@ -150,7 +150,7 @@ pub struct RawParts<Offset: OffsetType> {
 }
 
 /// UTF-8 string view over `RawTape`.
-pub struct StringTape<Offset: OffsetType = i32, A: Allocator = Global> {
+pub struct CharsTape<Offset: OffsetType = i32, A: Allocator = Global> {
     inner: RawTape<Offset, A>,
 }
 
@@ -169,7 +169,7 @@ pub struct RawTapeView<'a, Offset: OffsetType> {
 }
 
 /// UTF-8 string view over `RawTapeView`.
-pub struct StringTapeView<'a, Offset: OffsetType = i32> {
+pub struct CharsTapeView<'a, Offset: OffsetType = i32> {
     inner: RawTapeView<'a, Offset>,
 }
 
@@ -178,7 +178,7 @@ pub struct BytesTapeView<'a, Offset: OffsetType = i32> {
     inner: RawTapeView<'a, Offset>,
 }
 
-/// Trait for offset types used in StringTape.
+/// Trait for offset types used in CharsTape.
 ///
 /// This trait defines the interface for offset types that can be used to index
 /// into the string data buffer. Implementations are provided for `i32` and `i64`
@@ -254,16 +254,16 @@ impl OffsetType for u64 {
 }
 
 impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
-    /// Creates a new, empty StringTape with the global allocator.
+    /// Creates a new, empty CharsTape with the global allocator.
     ///
     /// This operation is O(1) and does not allocate memory until the first string is pushed.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::StringTapeI32;
+    /// use stringtape::CharsTapeI32;
     ///
-    /// let tape = StringTapeI32::new();
+    /// let tape = CharsTapeI32::new();
     /// assert!(tape.is_empty());
     /// assert_eq!(tape.len(), 0);
     /// ```
@@ -271,17 +271,17 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
         RawTape::new_in(Global)
     }
 
-    /// Creates a new, empty StringTape with a custom allocator.
+    /// Creates a new, empty CharsTape with a custom allocator.
     ///
     /// This operation is O(1) and does not allocate memory until the first string is pushed.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::StringTape;
+    /// use stringtape::CharsTape;
     /// use allocator_api2::alloc::Global;
     ///
-    /// let tape: StringTape<i32, Global> = StringTape::new_in(Global);
+    /// let tape: CharsTape<i32, Global> = CharsTape::new_in(Global);
     /// assert!(tape.is_empty());
     /// assert_eq!(tape.len(), 0);
     /// ```
@@ -296,7 +296,7 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
         }
     }
 
-    /// Creates a new StringTape with pre-allocated capacity using the global allocator.
+    /// Creates a new CharsTape with pre-allocated capacity using the global allocator.
     ///
     /// Pre-allocating capacity can improve performance when you know approximately
     /// how much data you'll be storing.
@@ -309,10 +309,10 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::{StringTapeI32, StringTapeError};
+    /// use stringtape::{CharsTapeI32, StringTapeError};
     ///
     /// // Pre-allocate space for ~1KB of string data and 100 strings
-    /// let tape = StringTapeI32::with_capacity(1024, 100)?;
+    /// let tape = CharsTapeI32::with_capacity(1024, 100)?;
     /// assert_eq!(tape.data_capacity(), 1024);
     /// # Ok::<(), StringTapeError>(())
     /// ```
@@ -323,7 +323,7 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
         RawTape::with_capacity_in(data_capacity, strings_capacity, Global)
     }
 
-    /// Creates a new StringTape with pre-allocated capacity and a custom allocator.
+    /// Creates a new CharsTape with pre-allocated capacity and a custom allocator.
     ///
     /// Pre-allocating capacity can improve performance when you know approximately
     /// how much data you'll be storing.
@@ -337,10 +337,10 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::{StringTape, StringTapeError};
+    /// use stringtape::{CharsTape, StringTapeError};
     /// use allocator_api2::alloc::Global;
     ///
-    /// let tape: StringTape<i32, Global> = StringTape::with_capacity_in(1024, 100, Global)?;
+    /// let tape: CharsTape<i32, Global> = CharsTape::with_capacity_in(1024, 100, Global)?;
     /// assert_eq!(tape.data_capacity(), 1024);
     /// # Ok::<(), StringTapeError>(())
     /// ```
@@ -537,7 +537,7 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
         self.len_items
     }
 
-    /// Returns `true` if the StringTape contains no strings.
+    /// Returns `true` if the CharsTape contains no strings.
     pub fn is_empty(&self) -> bool {
         self.len_items == 0
     }
@@ -625,7 +625,7 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
     ///
     /// # Safety
     ///
-    /// The returned pointers are valid only as long as the StringTape is not modified.
+    /// The returned pointers are valid only as long as the CharsTape is not modified.
     pub fn as_raw_parts(&self) -> RawParts<Offset> {
         let data_ptr = self
             .data
@@ -843,7 +843,7 @@ impl<'a, Offset: OffsetType> RawTapeView<'a, Offset> {
     /// - `data` contains valid bytes for the lifetime `'a`
     /// - `offsets` contains valid offsets with length `items_count + 1`
     /// - All offsets are within bounds of the data slice
-    /// - For StringTapeView, data must be valid UTF-8
+    /// - For CharsTapeView, data must be valid UTF-8
     pub unsafe fn from_raw_parts(data: &'a [u8], offsets: &'a [Offset]) -> Self {
         Self { data, offsets }
     }
@@ -982,11 +982,11 @@ impl<'a, Offset: OffsetType> Index<RangeToInclusive<usize>> for RawTapeView<'a, 
 }
 
 // ========================
-// StringTapeView implementation
+// CharsTapeView implementation
 // ========================
 
-impl<'a, Offset: OffsetType> StringTapeView<'a, Offset> {
-    /// Creates a zero-copy StringTapeView from raw Arrow StringArray parts.
+impl<'a, Offset: OffsetType> CharsTapeView<'a, Offset> {
+    /// Creates a zero-copy CharsTapeView from raw Arrow StringArray parts.
     ///
     /// # Safety
     ///
@@ -1002,7 +1002,7 @@ impl<'a, Offset: OffsetType> StringTapeView<'a, Offset> {
 
     /// Returns a reference to the string at the given index, or `None` if out of bounds.
     pub fn get(&self, index: usize) -> Option<&str> {
-        // Safe because StringTapeView only comes from StringTape which validates UTF-8
+        // Safe because CharsTapeView only comes from CharsTape which validates UTF-8
         self.inner
             .get(index)
             .map(|b| unsafe { core::str::from_utf8_unchecked(b) })
@@ -1028,8 +1028,8 @@ impl<'a, Offset: OffsetType> StringTapeView<'a, Offset> {
         &self,
         start: usize,
         end: usize,
-    ) -> Result<StringTapeView<'a, Offset>, StringTapeError> {
-        Ok(StringTapeView {
+    ) -> Result<CharsTapeView<'a, Offset>, StringTapeError> {
+        Ok(CharsTapeView {
             inner: self.inner.subview(start, end)?,
         })
     }
@@ -1040,7 +1040,7 @@ impl<'a, Offset: OffsetType> StringTapeView<'a, Offset> {
     }
 }
 
-impl<'a, Offset: OffsetType> Index<usize> for StringTapeView<'a, Offset> {
+impl<'a, Offset: OffsetType> Index<usize> for CharsTapeView<'a, Offset> {
     type Output = str;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -1113,35 +1113,35 @@ impl<'a, Offset: OffsetType> Index<usize> for BytesTapeView<'a, Offset> {
 }
 
 // ========================
-// StringTape (UTF-8 view)
+// CharsTape (UTF-8 view)
 // ========================
 
-impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
-    /// Creates a new, empty StringTape with the global allocator.
-    pub fn new() -> StringTape<Offset, Global> {
-        StringTape {
+impl<Offset: OffsetType, A: Allocator> CharsTape<Offset, A> {
+    /// Creates a new, empty CharsTape with the global allocator.
+    pub fn new() -> CharsTape<Offset, Global> {
+        CharsTape {
             inner: RawTape::<Offset, Global>::new(),
         }
     }
 
-    /// Creates a new, empty StringTape with a custom allocator.
+    /// Creates a new, empty CharsTape with a custom allocator.
     pub fn new_in(allocator: A) -> Self {
         Self {
             inner: RawTape::<Offset, A>::new_in(allocator),
         }
     }
 
-    /// Creates a new StringTape with pre-allocated capacity using the global allocator.
+    /// Creates a new CharsTape with pre-allocated capacity using the global allocator.
     pub fn with_capacity(
         data_capacity: usize,
         strings_capacity: usize,
-    ) -> Result<StringTape<Offset, Global>, StringTapeError> {
-        Ok(StringTape {
+    ) -> Result<CharsTape<Offset, Global>, StringTapeError> {
+        Ok(CharsTape {
             inner: RawTape::<Offset, Global>::with_capacity(data_capacity, strings_capacity)?,
         })
     }
 
-    /// Creates a new StringTape with pre-allocated capacity and a custom allocator.
+    /// Creates a new CharsTape with pre-allocated capacity and a custom allocator.
     pub fn with_capacity_in(
         data_capacity: usize,
         strings_capacity: usize,
@@ -1156,25 +1156,25 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         })
     }
 
-    /// Adds a string to the end of the StringTape.
+    /// Adds a string to the end of the CharsTape.
     pub fn push(&mut self, s: &str) -> Result<(), StringTapeError> {
         self.inner.push(s.as_bytes())
     }
 
     /// Returns a reference to the string at the given index, or `None` if out of bounds.
     pub fn get(&self, index: usize) -> Option<&str> {
-        // Safe because StringTape only accepts &str pushes.
+        // Safe because CharsTape only accepts &str pushes.
         self.inner
             .get(index)
             .map(|b| unsafe { core::str::from_utf8_unchecked(b) })
     }
 
-    /// Returns the number of strings in the StringTape.
+    /// Returns the number of strings in the CharsTape.
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
-    /// Returns `true` if the StringTape contains no strings.
+    /// Returns `true` if the CharsTape contains no strings.
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
@@ -1199,17 +1199,17 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         self.inner.offsets_capacity()
     }
 
-    /// Removes all strings from the StringTape, keeping allocated capacity.
+    /// Removes all strings from the CharsTape, keeping allocated capacity.
     pub fn clear(&mut self) {
         self.inner.clear()
     }
 
-    /// Shortens the StringTape, keeping the first `len` strings and dropping the rest.
+    /// Shortens the CharsTape, keeping the first `len` strings and dropping the rest.
     pub fn truncate(&mut self, len: usize) {
         self.inner.truncate(len)
     }
 
-    /// Extends the StringTape with the contents of an iterator.
+    /// Extends the CharsTape with the contents of an iterator.
     pub fn extend<I>(&mut self, iter: I) -> Result<(), StringTapeError>
     where
         I: IntoIterator,
@@ -1221,7 +1221,7 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         Ok(())
     }
 
-    /// Returns the raw parts of the StringTape for Apache Arrow compatibility.
+    /// Returns the raw parts of the CharsTape for Apache Arrow compatibility.
     pub fn as_raw_parts(&self) -> RawParts<Offset> {
         self.inner.as_raw_parts()
     }
@@ -1236,32 +1236,32 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
         self.inner.offsets_slice()
     }
 
-    pub fn iter(&self) -> StringTapeIter<'_, Offset, A> {
-        StringTapeIter {
+    pub fn iter(&self) -> CharsTapeIter<'_, Offset, A> {
+        CharsTapeIter {
             tape: self,
             index: 0,
         }
     }
 
-    /// Returns a reference to the allocator used by this StringTape.
+    /// Returns a reference to the allocator used by this CharsTape.
     pub fn allocator(&self) -> &A {
         self.inner.allocator()
     }
 
-    /// Creates a view of the entire StringTape.
-    pub fn view(&self) -> StringTapeView<'_, Offset> {
-        StringTapeView {
+    /// Creates a view of the entire CharsTape.
+    pub fn view(&self) -> CharsTapeView<'_, Offset> {
+        CharsTapeView {
             inner: self.inner.view(),
         }
     }
 
-    /// Creates a subview of a continuous slice of this StringTape.
+    /// Creates a subview of a continuous slice of this CharsTape.
     pub fn subview(
         &self,
         start: usize,
         end: usize,
-    ) -> Result<StringTapeView<'_, Offset>, StringTapeError> {
-        Ok(StringTapeView {
+    ) -> Result<CharsTapeView<'_, Offset>, StringTapeError> {
+        Ok(CharsTapeView {
             inner: self.inner.subview(start, end)?,
         })
     }
@@ -1272,22 +1272,22 @@ impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
     }
 }
 
-impl<Offset: OffsetType, A: Allocator> Drop for StringTape<Offset, A> {
+impl<Offset: OffsetType, A: Allocator> Drop for CharsTape<Offset, A> {
     fn drop(&mut self) {
         // Explicit drop of inner to run RawTape's Drop
         // (redundant but keeps intent clear)
     }
 }
 
-unsafe impl<Offset: OffsetType + Send, A: Allocator + Send> Send for StringTape<Offset, A> {}
-unsafe impl<Offset: OffsetType + Sync, A: Allocator + Sync> Sync for StringTape<Offset, A> {}
+unsafe impl<Offset: OffsetType + Send, A: Allocator + Send> Send for CharsTape<Offset, A> {}
+unsafe impl<Offset: OffsetType + Sync, A: Allocator + Sync> Sync for CharsTape<Offset, A> {}
 
-pub struct StringTapeIter<'a, Offset: OffsetType, A: Allocator> {
-    tape: &'a StringTape<Offset, A>,
+pub struct CharsTapeIter<'a, Offset: OffsetType, A: Allocator> {
+    tape: &'a CharsTape<Offset, A>,
     index: usize,
 }
 
-impl<'a, Offset: OffsetType, A: Allocator> Iterator for StringTapeIter<'a, Offset, A> {
+impl<'a, Offset: OffsetType, A: Allocator> Iterator for CharsTapeIter<'a, Offset, A> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1304,31 +1304,31 @@ impl<'a, Offset: OffsetType, A: Allocator> Iterator for StringTapeIter<'a, Offse
     }
 }
 
-impl<'a, Offset: OffsetType, A: Allocator> ExactSizeIterator for StringTapeIter<'a, Offset, A> {}
+impl<'a, Offset: OffsetType, A: Allocator> ExactSizeIterator for CharsTapeIter<'a, Offset, A> {}
 
-impl<Offset: OffsetType> FromIterator<String> for StringTape<Offset, Global> {
+impl<Offset: OffsetType> FromIterator<String> for CharsTape<Offset, Global> {
     fn from_iter<I: IntoIterator<Item = String>>(iter: I) -> Self {
-        let mut tape = StringTape::<Offset, Global>::new();
+        let mut tape = CharsTape::<Offset, Global>::new();
         for s in iter {
             tape.push(&s)
-                .expect("Failed to build StringTape from iterator");
+                .expect("Failed to build CharsTape from iterator");
         }
         tape
     }
 }
 
-impl<'a, Offset: OffsetType> FromIterator<&'a str> for StringTape<Offset, Global> {
+impl<'a, Offset: OffsetType> FromIterator<&'a str> for CharsTape<Offset, Global> {
     fn from_iter<I: IntoIterator<Item = &'a str>>(iter: I) -> Self {
-        let mut tape = StringTape::<Offset, Global>::new();
+        let mut tape = CharsTape::<Offset, Global>::new();
         for s in iter {
             tape.push(s)
-                .expect("Failed to build StringTape from iterator");
+                .expect("Failed to build CharsTape from iterator");
         }
         tape
     }
 }
 
-impl<Offset: OffsetType, A: Allocator> Index<usize> for StringTape<Offset, A> {
+impl<Offset: OffsetType, A: Allocator> Index<usize> for CharsTape<Offset, A> {
     type Output = str;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -1336,9 +1336,9 @@ impl<Offset: OffsetType, A: Allocator> Index<usize> for StringTape<Offset, A> {
     }
 }
 
-impl<'a, Offset: OffsetType, A: Allocator> IntoIterator for &'a StringTape<Offset, A> {
+impl<'a, Offset: OffsetType, A: Allocator> IntoIterator for &'a CharsTape<Offset, A> {
     type Item = &'a str;
-    type IntoIter = StringTapeIter<'a, Offset, A>;
+    type IntoIter = CharsTapeIter<'a, Offset, A>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
@@ -1496,29 +1496,29 @@ impl<Offset: OffsetType, A: Allocator> Index<usize> for BytesTape<Offset, A> {
 }
 
 // Signed (Arrow-compatible) aliases
-pub type StringTapeI32 = StringTape<i32, Global>;
-pub type StringTapeI64 = StringTape<i64, Global>;
+pub type CharsTapeI32 = CharsTape<i32, Global>;
+pub type CharsTapeI64 = CharsTape<i64, Global>;
 pub type BytesTapeI32 = BytesTape<i32, Global>;
 pub type BytesTapeI64 = BytesTape<i64, Global>;
 
-pub type StringTapeViewI32<'a> = StringTapeView<'a, i32>;
-pub type StringTapeViewI64<'a> = StringTapeView<'a, i64>;
+pub type CharsTapeViewI32<'a> = CharsTapeView<'a, i32>;
+pub type CharsTapeViewI64<'a> = CharsTapeView<'a, i64>;
 pub type BytesTapeViewI32<'a> = BytesTapeView<'a, i32>;
 pub type BytesTapeViewI64<'a> = BytesTapeView<'a, i64>;
 
 // Unsigned aliases (not zero-copy with Arrow)
-pub type StringTapeU32 = StringTape<u32, Global>;
-pub type StringTapeU64 = StringTape<u64, Global>;
+pub type CharsTapeU32 = CharsTape<u32, Global>;
+pub type CharsTapeU64 = CharsTape<u64, Global>;
 pub type BytesTapeU32 = BytesTape<u32, Global>;
 pub type BytesTapeU64 = BytesTape<u64, Global>;
 
-pub type StringTapeViewU32<'a> = StringTapeView<'a, u32>;
-pub type StringTapeViewU64<'a> = StringTapeView<'a, u64>;
+pub type CharsTapeViewU32<'a> = CharsTapeView<'a, u32>;
+pub type CharsTapeViewU64<'a> = CharsTapeView<'a, u64>;
 pub type BytesTapeViewU32<'a> = BytesTapeView<'a, u32>;
 pub type BytesTapeViewU64<'a> = BytesTapeView<'a, u64>;
 
-// Conversion implementations between BytesTape and StringTape
-impl<Offset: OffsetType, A: Allocator> TryFrom<BytesTape<Offset, A>> for StringTape<Offset, A> {
+// Conversion implementations between BytesTape and CharsTape
+impl<Offset: OffsetType, A: Allocator> TryFrom<BytesTape<Offset, A>> for CharsTape<Offset, A> {
     type Error = StringTapeError;
 
     fn try_from(bytes_tape: BytesTape<Offset, A>) -> Result<Self, Self::Error> {
@@ -1538,19 +1538,19 @@ impl<Offset: OffsetType, A: Allocator> TryFrom<BytesTape<Offset, A>> for StringT
             std::mem::forget(bytes_tape);
             inner
         };
-        Ok(StringTape { inner })
+        Ok(CharsTape { inner })
     }
 }
 
-impl<Offset: OffsetType, A: Allocator> From<StringTape<Offset, A>> for BytesTape<Offset, A> {
-    fn from(string_tape: StringTape<Offset, A>) -> Self {
-        // StringTape already contains valid UTF-8, so conversion to BytesTape is infallible
-        // We need to take ownership of the inner RawTape without dropping StringTape
+impl<Offset: OffsetType, A: Allocator> From<CharsTape<Offset, A>> for BytesTape<Offset, A> {
+    fn from(chars_tape: CharsTape<Offset, A>) -> Self {
+        // CharsTape already contains valid UTF-8, so conversion to BytesTape is infallible
+        // We need to take ownership of the inner RawTape without dropping CharsTape
         let inner = unsafe {
             // Take ownership of the inner RawTape
-            let inner = std::ptr::read(&string_tape.inner);
-            // Prevent StringTape's destructor from running
-            std::mem::forget(string_tape);
+            let inner = std::ptr::read(&chars_tape.inner);
+            // Prevent CharsTape's destructor from running
+            std::mem::forget(chars_tape);
             inner
         };
         BytesTape { inner }
@@ -1558,18 +1558,18 @@ impl<Offset: OffsetType, A: Allocator> From<StringTape<Offset, A>> for BytesTape
 }
 
 impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
-    pub fn try_into_string_tape(self) -> Result<StringTape<Offset, A>, StringTapeError> {
+    pub fn try_into_chars_tape(self) -> Result<CharsTape<Offset, A>, StringTapeError> {
         self.try_into()
     }
 }
 
-impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
+impl<Offset: OffsetType, A: Allocator> CharsTape<Offset, A> {
     pub fn into_bytes_tape(self) -> BytesTape<Offset, A> {
         self.into()
     }
 }
 
-impl<Offset: OffsetType> Default for StringTape<Offset, Global> {
+impl<Offset: OffsetType> Default for CharsTape<Offset, Global> {
     fn default() -> Self {
         Self::new()
     }
@@ -1584,7 +1584,7 @@ mod tests {
 
     #[test]
     fn basic_operations() {
-        let mut tape = StringTapeI32::new();
+        let mut tape = CharsTapeI32::new();
         assert!(tape.is_empty());
 
         tape.push("hello").unwrap();
@@ -1601,7 +1601,7 @@ mod tests {
     #[test]
     fn unsigned_basic_operations() {
         // u32
-        let mut t32 = StringTapeU32::new();
+        let mut t32 = CharsTapeU32::new();
         t32.push("hello").unwrap();
         t32.push("world").unwrap();
         assert_eq!(t32.len(), 2);
@@ -1609,7 +1609,7 @@ mod tests {
         assert_eq!(t32.get(1), Some("world"));
 
         // u64
-        let mut t64 = StringTapeU64::new();
+        let mut t64 = CharsTapeU64::new();
         t64.extend(["a", "", "bbb"]).unwrap();
         assert_eq!(t64.len(), 3);
         assert_eq!(t64.get(0), Some("a"));
@@ -1619,14 +1619,14 @@ mod tests {
 
     #[test]
     fn offsets_64bit() {
-        let mut tape = StringTapeI64::new();
+        let mut tape = CharsTapeI64::new();
         tape.push("test").unwrap();
         assert_eq!(tape.get(0), Some("test"));
     }
 
     #[test]
     fn iterator_basics() {
-        let mut tape = StringTapeI32::new();
+        let mut tape = CharsTapeI32::new();
         tape.push("a").unwrap();
         tape.push("b").unwrap();
         tape.push("c").unwrap();
@@ -1637,7 +1637,7 @@ mod tests {
 
     #[test]
     fn empty_strings() {
-        let mut tape = StringTapeI32::new();
+        let mut tape = CharsTapeI32::new();
         tape.push("").unwrap();
         tape.push("non-empty").unwrap();
         tape.push("").unwrap();
@@ -1650,7 +1650,7 @@ mod tests {
 
     #[test]
     fn index_trait() {
-        let mut tape = StringTapeI32::new();
+        let mut tape = CharsTapeI32::new();
         tape.push("hello").unwrap();
         tape.push("world").unwrap();
 
@@ -1660,7 +1660,7 @@ mod tests {
 
     #[test]
     fn into_iterator() {
-        let mut tape = StringTapeI32::new();
+        let mut tape = CharsTapeI32::new();
         tape.push("a").unwrap();
         tape.push("b").unwrap();
         tape.push("c").unwrap();
@@ -1679,7 +1679,7 @@ mod tests {
     #[test]
     fn from_iterator() {
         let strings = vec!["hello", "world", "test"];
-        let tape: StringTapeI32 = strings.into_iter().collect();
+        let tape: CharsTapeI32 = strings.into_iter().collect();
 
         assert_eq!(tape.len(), 3);
         assert_eq!(tape.get(0), Some("hello"));
@@ -1690,8 +1690,8 @@ mod tests {
     #[test]
     fn from_iterator_unsigned() {
         let strings = vec!["hello", "world", "test"];
-        let tape_u32: StringTapeU32 = strings.clone().into_iter().collect();
-        let tape_u64: StringTapeU64 = strings.clone().into_iter().collect();
+        let tape_u32: CharsTapeU32 = strings.clone().into_iter().collect();
+        let tape_u64: CharsTapeU64 = strings.clone().into_iter().collect();
         assert_eq!(tape_u32.len(), 3);
         assert_eq!(tape_u64.len(), 3);
         assert_eq!(tape_u32.get(1), Some("world"));
@@ -1700,7 +1700,7 @@ mod tests {
 
     #[test]
     fn extend() {
-        let mut tape = StringTapeI32::new();
+        let mut tape = CharsTapeI32::new();
         tape.push("initial").unwrap();
 
         let additional = vec!["hello", "world"];
@@ -1714,7 +1714,7 @@ mod tests {
 
     #[test]
     fn clear_and_truncate() {
-        let mut tape = StringTapeI32::new();
+        let mut tape = CharsTapeI32::new();
         tape.push("a").unwrap();
         tape.push("b").unwrap();
         tape.push("c").unwrap();
@@ -1734,7 +1734,7 @@ mod tests {
 
     #[test]
     fn unsigned_views_and_subviews() {
-        let mut tape = StringTapeU32::new();
+        let mut tape = CharsTapeU32::new();
         tape.extend(["0", "1", "22", "333"]).unwrap();
         let view = tape.subview(1, 4).unwrap();
         assert_eq!(view.len(), 3);
@@ -1747,7 +1747,7 @@ mod tests {
 
     #[test]
     fn capacity() {
-        let tape = StringTapeI32::with_capacity(100, 10).unwrap();
+        let tape = CharsTapeI32::with_capacity(100, 10).unwrap();
         assert_eq!(tape.data_capacity(), 100);
         assert_eq!(tape.capacity(), 0); // No strings added yet
     }
@@ -1755,7 +1755,7 @@ mod tests {
     #[test]
     fn custom_allocator() {
         // Using the Global allocator explicitly
-        let mut tape: StringTape<i32, Global> = StringTape::new_in(Global);
+        let mut tape: CharsTape<i32, Global> = CharsTape::new_in(Global);
 
         tape.push("hello").unwrap();
         tape.push("world").unwrap();
@@ -1770,7 +1770,7 @@ mod tests {
 
     #[test]
     fn custom_allocator_with_capacity() {
-        let tape: StringTape<i64, Global> = StringTape::with_capacity_in(256, 50, Global).unwrap();
+        let tape: CharsTape<i64, Global> = CharsTape::with_capacity_in(256, 50, Global).unwrap();
 
         assert_eq!(tape.data_capacity(), 256);
         assert!(tape.is_empty());
@@ -1798,8 +1798,8 @@ mod tests {
     }
 
     #[test]
-    fn string_tape_view_basic() {
-        let mut tape = StringTapeI32::new();
+    fn chars_tape_view_basic() {
+        let mut tape = CharsTapeI32::new();
         tape.push("hello").unwrap();
         tape.push("world").unwrap();
         tape.push("foo").unwrap();
@@ -1818,8 +1818,8 @@ mod tests {
     }
 
     #[test]
-    fn string_tape_range_syntax() {
-        let mut tape = StringTapeI32::new();
+    fn chars_tape_range_syntax() {
+        let mut tape = CharsTapeI32::new();
         tape.push("a").unwrap();
         tape.push("b").unwrap();
         tape.push("c").unwrap();
@@ -1839,8 +1839,8 @@ mod tests {
     }
 
     #[test]
-    fn string_tape_view_subslicing() {
-        let mut tape = StringTapeI32::new();
+    fn chars_tape_view_subslicing() {
+        let mut tape = CharsTapeI32::new();
         tape.push("0").unwrap();
         tape.push("1").unwrap();
         tape.push("2").unwrap();
@@ -1890,7 +1890,7 @@ mod tests {
 
     #[test]
     fn view_empty_strings() {
-        let mut tape = StringTapeI32::new();
+        let mut tape = CharsTapeI32::new();
         tape.push("").unwrap();
         tape.push("non-empty").unwrap();
         tape.push("").unwrap();
@@ -1905,7 +1905,7 @@ mod tests {
 
     #[test]
     fn view_single_item() {
-        let mut tape = StringTapeI32::new();
+        let mut tape = CharsTapeI32::new();
         tape.push("only").unwrap();
 
         let view = tape.subview(0, 1).unwrap();
@@ -1915,7 +1915,7 @@ mod tests {
 
     #[test]
     fn view_bounds_checking() {
-        let mut tape = StringTapeI32::new();
+        let mut tape = CharsTapeI32::new();
         tape.push("a").unwrap();
         tape.push("b").unwrap();
 
@@ -1932,7 +1932,7 @@ mod tests {
 
     #[test]
     fn view_data_properties() {
-        let mut tape = StringTapeI32::new();
+        let mut tape = CharsTapeI32::new();
         tape.push("hello").unwrap(); // 5 bytes
         tape.push("world").unwrap(); // 5 bytes
         tape.push("!").unwrap(); // 1 byte
@@ -1947,7 +1947,7 @@ mod tests {
 
     #[test]
     fn view_raw_parts() {
-        let mut tape = StringTapeI32::new();
+        let mut tape = CharsTapeI32::new();
         tape.push("test").unwrap();
         tape.push("data").unwrap();
 
@@ -1962,10 +1962,10 @@ mod tests {
 
     #[test]
     fn view_type_aliases() {
-        let mut tape = StringTapeI32::new();
+        let mut tape = CharsTapeI32::new();
         tape.push("test").unwrap();
 
-        let _view: StringTapeViewI32 = tape.subview(0, 1).unwrap();
+        let _view: CharsTapeViewI32 = tape.subview(0, 1).unwrap();
 
         let mut bytes_tape = BytesTapeI64::new();
         bytes_tape.push(b"test").unwrap();
@@ -1978,30 +1978,30 @@ mod tests {
         let items = ["x", "yy", "", "zzz"];
 
         // From u32 iterator
-        let mut u32t = StringTapeU32::new();
+        let mut u32t = CharsTapeU32::new();
         u32t.extend(items).unwrap();
-        let t_from_u32: StringTapeI32 = u32t.iter().collect();
+        let t_from_u32: CharsTapeI32 = u32t.iter().collect();
         assert_eq!(t_from_u32.len(), items.len());
         assert_eq!(t_from_u32.get(1), Some("yy"));
 
         // From u64 iterator
-        let mut u64t = StringTapeU64::new();
+        let mut u64t = CharsTapeU64::new();
         u64t.extend(items).unwrap();
-        let t_from_u64: StringTapeI32 = u64t.iter().collect();
+        let t_from_u64: CharsTapeI32 = u64t.iter().collect();
         assert_eq!(t_from_u64.len(), items.len());
         assert_eq!(t_from_u64.get(3), Some("zzz"));
 
         // From i64 iterator
-        let mut i64t = StringTapeI64::new();
+        let mut i64t = CharsTapeI64::new();
         i64t.extend(items).unwrap();
-        let t_from_i64: StringTapeI32 = i64t.iter().collect();
+        let t_from_i64: CharsTapeI32 = i64t.iter().collect();
         assert_eq!(t_from_i64.len(), items.len());
         assert_eq!(t_from_i64.get(2), Some(""));
     }
 
     #[test]
     fn range_indexing_syntax() {
-        let mut tape = StringTapeI32::new();
+        let mut tape = CharsTapeI32::new();
         tape.push("a").unwrap();
         tape.push("b").unwrap();
         tape.push("c").unwrap();
@@ -2032,8 +2032,8 @@ mod tests {
     use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
 
     #[test]
-    fn stringtape_to_arrow_string_array() {
-        let mut tape = StringTapeI32::new();
+    fn charstape_to_arrow_string_array() {
+        let mut tape = CharsTapeI32::new();
         tape.extend(["hello", "world", "", "arrow"]).unwrap();
 
         let (data_slice, offsets_slice) = tape.arrow_slices();
@@ -2051,12 +2051,12 @@ mod tests {
     }
 
     #[test]
-    fn arrow_string_array_to_stringtape_view() {
+    fn arrow_string_array_to_charstape_view() {
         let arrow_array = StringArray::from(vec!["foo", "bar", ""]);
 
-        // Zero-copy conversion to StringTapeView
+        // Zero-copy conversion to CharsTapeView
         let view = unsafe {
-            StringTapeViewI32::from_raw_parts(arrow_array.values(), arrow_array.offsets().as_ref())
+            CharsTapeViewI32::from_raw_parts(arrow_array.values(), arrow_array.offsets().as_ref())
         };
 
         assert_eq!(view.len(), 3);
@@ -2084,7 +2084,7 @@ mod tests {
     #[test]
     fn zero_copy_roundtrip() {
         // Original data
-        let mut tape = StringTapeI32::new();
+        let mut tape = CharsTapeI32::new();
         tape.extend(["hello", "", "world"]).unwrap();
 
         // Convert to Arrow (zero-copy)
@@ -2097,9 +2097,9 @@ mod tests {
         ));
         let arrow_array = StringArray::new(offsets_buffer, data_buffer, None);
 
-        // Convert back to StringTapeView (zero-copy)
+        // Convert back to CharsTapeView (zero-copy)
         let view = unsafe {
-            StringTapeViewI32::from_raw_parts(arrow_array.values(), arrow_array.offsets().as_ref())
+            CharsTapeViewI32::from_raw_parts(arrow_array.values(), arrow_array.offsets().as_ref())
         };
 
         // Verify data integrity without any copying
@@ -2118,15 +2118,15 @@ mod tests {
         bytes_tape.push(b"").unwrap();
         bytes_tape.push(b"rust").unwrap();
 
-        let string_tape: Result<StringTapeI32, _> = bytes_tape.try_into();
-        assert!(string_tape.is_ok());
+        let chars_tape: Result<CharsTapeI32, _> = bytes_tape.try_into();
+        assert!(chars_tape.is_ok());
 
-        let string_tape = string_tape.unwrap();
-        assert_eq!(string_tape.len(), 4);
-        assert_eq!(string_tape.get(0), Some("hello"));
-        assert_eq!(string_tape.get(1), Some("world"));
-        assert_eq!(string_tape.get(2), Some(""));
-        assert_eq!(string_tape.get(3), Some("rust"));
+        let chars_tape = chars_tape.unwrap();
+        assert_eq!(chars_tape.len(), 4);
+        assert_eq!(chars_tape.get(0), Some("hello"));
+        assert_eq!(chars_tape.get(1), Some("world"));
+        assert_eq!(chars_tape.get(2), Some(""));
+        assert_eq!(chars_tape.get(3), Some("rust"));
     }
 
     #[test]
@@ -2137,10 +2137,10 @@ mod tests {
         bytes_tape.push(&[0xFF, 0xFE]).unwrap(); // Invalid UTF-8 sequence
         bytes_tape.push(b"also valid").unwrap();
 
-        let string_tape: Result<StringTapeI32, _> = bytes_tape.try_into();
-        assert!(string_tape.is_err());
+        let chars_tape: Result<CharsTapeI32, _> = bytes_tape.try_into();
+        assert!(chars_tape.is_err());
 
-        match string_tape {
+        match chars_tape {
             Err(StringTapeError::Utf8Error(_)) => {}
             _ => panic!("Expected Utf8Error"),
         }
@@ -2148,14 +2148,14 @@ mod tests {
 
     #[test]
     fn string_to_bytes_conversion() {
-        // Test infallible conversion from StringTape to BytesTape
-        let mut string_tape = StringTapeI32::new();
-        string_tape.push("hello").unwrap();
-        string_tape.push("世界").unwrap(); // Unicode characters
-        string_tape.push("").unwrap();
-        string_tape.push("🦀").unwrap(); // Emoji
+        // Test infallible conversion from CharsTape to BytesTape
+        let mut chars_tape = CharsTapeI32::new();
+        chars_tape.push("hello").unwrap();
+        chars_tape.push("世界").unwrap(); // Unicode characters
+        chars_tape.push("").unwrap();
+        chars_tape.push("🦀").unwrap(); // Emoji
 
-        let bytes_tape: BytesTapeI32 = string_tape.into();
+        let bytes_tape: BytesTapeI32 = chars_tape.into();
         assert_eq!(bytes_tape.len(), 4);
         assert_eq!(&bytes_tape[0], b"hello");
         assert_eq!(&bytes_tape[1], "世界".as_bytes());
@@ -2165,24 +2165,24 @@ mod tests {
 
     #[test]
     fn conversion_convenience_methods() {
-        // Test try_into_string_tape method
+        // Test try_into_chars_tape method
         let mut bytes_tape = BytesTapeI32::new();
         bytes_tape.push(b"test").unwrap();
-        let string_result = bytes_tape.try_into_string_tape();
+        let string_result = bytes_tape.try_into_chars_tape();
         assert!(string_result.is_ok());
         assert_eq!(string_result.unwrap().get(0), Some("test"));
 
         // Test into_bytes_tape method
-        let mut string_tape = StringTapeI32::new();
-        string_tape.push("test").unwrap();
-        let bytes_back = string_tape.into_bytes_tape();
+        let mut chars_tape = CharsTapeI32::new();
+        chars_tape.push("test").unwrap();
+        let bytes_back = chars_tape.into_bytes_tape();
         assert_eq!(&bytes_back[0], b"test");
     }
 
     #[test]
     fn conversion_round_trip() {
         // Test round-trip conversion preserves data
-        let mut original = StringTapeI32::new();
+        let mut original = CharsTapeI32::new();
         original.push("first").unwrap();
         original.push("second").unwrap();
         original.push("third").unwrap();
@@ -2192,7 +2192,7 @@ mod tests {
 
         // Convert to BytesTape and back
         let bytes: BytesTapeI32 = original.into();
-        let recovered: StringTapeI32 = bytes.try_into().unwrap();
+        let recovered: CharsTapeI32 = bytes.try_into().unwrap();
 
         assert_eq!(expected.len(), recovered.len());
         for (i, expected_str) in expected.iter().enumerate() {
