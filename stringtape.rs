@@ -49,7 +49,7 @@ use core::ptr::{self, NonNull};
 use core::slice;
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::string::String;
 
 use allocator_api2::alloc::{Allocator, Global, Layout};
 
@@ -66,7 +66,7 @@ pub enum StringTapeError {
     /// Index is out of bounds for the current number of strings.
     IndexOutOfBounds,
     /// Invalid UTF-8 sequence encountered.
-    Utf8Error(std::str::Utf8Error),
+    Utf8Error(core::str::Utf8Error),
 }
 
 impl fmt::Display for StringTapeError {
@@ -1524,7 +1524,7 @@ impl<Offset: OffsetType, A: Allocator> TryFrom<BytesTape<Offset, A>> for CharsTa
     fn try_from(bytes_tape: BytesTape<Offset, A>) -> Result<Self, Self::Error> {
         // Validate that all byte sequences are valid UTF-8
         for i in 0..bytes_tape.len() {
-            if let Err(e) = std::str::from_utf8(&bytes_tape[i]) {
+            if let Err(e) = core::str::from_utf8(&bytes_tape[i]) {
                 return Err(StringTapeError::Utf8Error(e));
             }
         }
@@ -1533,9 +1533,9 @@ impl<Offset: OffsetType, A: Allocator> TryFrom<BytesTape<Offset, A>> for CharsTa
         // We need to take ownership of the inner RawTape without dropping BytesTape
         let inner = unsafe {
             // Take ownership of the inner RawTape
-            let inner = std::ptr::read(&bytes_tape.inner);
+            let inner = core::ptr::read(&bytes_tape.inner);
             // Prevent BytesTape's destructor from running
-            std::mem::forget(bytes_tape);
+            core::mem::forget(bytes_tape);
             inner
         };
         Ok(CharsTape { inner })
@@ -1548,9 +1548,9 @@ impl<Offset: OffsetType, A: Allocator> From<CharsTape<Offset, A>> for BytesTape<
         // We need to take ownership of the inner RawTape without dropping CharsTape
         let inner = unsafe {
             // Take ownership of the inner RawTape
-            let inner = std::ptr::read(&chars_tape.inner);
+            let inner = core::ptr::read(&chars_tape.inner);
             // Prevent CharsTape's destructor from running
-            std::mem::forget(chars_tape);
+            core::mem::forget(chars_tape);
             inner
         };
         BytesTape { inner }
@@ -1581,6 +1581,8 @@ mod tests {
 
     #[cfg(not(feature = "std"))]
     use alloc::vec;
+    #[cfg(not(feature = "std"))]
+    use alloc::vec::Vec;
 
     #[test]
     fn basic_operations() {
@@ -2067,7 +2069,11 @@ mod tests {
 
     #[test]
     fn arrow_binary_array_to_bytestape_view() {
-        let values: Vec<Option<&[u8]>> = vec![Some(&[1u8, 2, 3]), Some(&[]), Some(&[4u8, 5])];
+        let values: Vec<Option<&[u8]>> = vec![
+            Some(&[1u8, 2, 3] as &[u8]),
+            Some(&[] as &[u8]),
+            Some(&[4u8, 5] as &[u8]),
+        ];
         let arrow_array = BinaryArray::from(values);
 
         // Zero-copy conversion to BytesTapeView
