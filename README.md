@@ -1,20 +1,21 @@
 # StringTape
 
-A memory-efficient string storage library compatible with [Apache Arrow](https://arrow.apache.org/)'s string array format.
-Stores multiple strings in a contiguous memory layout using offset-based indexing, similar to Arrow's `String` and `LargeString` arrays.
+A memory-efficient string and byte storage library compatible with [Apache Arrow](https://arrow.apache.org/)'s string and binary array formats.
+Stores multiple strings or byte slices in a contiguous memory layout using offset-based indexing, similar to Arrow's `String`/`LargeString` and `Binary`/`LargeBinary` arrays.
 
-- __Apache Arrow Compatible__: Matching `String` and `LargeString` arrays
-- __Memory Efficient__: All strings stored in two contiguous buffers
+- __Apache Arrow Compatible__: Matching `String`/`LargeString` and `Binary`/`LargeBinary` arrays
+- __UTF-8 and Binary Storage__: Use `CharsTape` for strings and `BytesTape` for raw bytes
+- __Memory Efficient__: All data stored in two contiguous buffers
 - __Zero-Copy Views__: Efficient slicing with `[i..n]` range syntax
 - __Zero Dependencies__: Pure Rust implementation, with `no_std` support
 
 ## Quick Start
 
 ```rust
-use stringtape::{StringTapeI32, StringTapeError};
+use stringtape::{CharsTapeI32, BytesTapeI32, StringTapeError};
 
-// Create a new StringTape with 32-bit offsets
-let mut tape = StringTapeI32::new();
+// Create a new CharsTape with 32-bit offsets
+let mut tape = CharsTapeI32::new();
 tape.push("hello")?;
 tape.push("world")?;
 
@@ -28,14 +29,20 @@ for s in &tape {
 }
 
 // Build from iterator
-let tape2: StringTapeI32 = ["a", "b", "c"].into_iter().collect();
+let tape2: CharsTapeI32 = ["a", "b", "c"].into_iter().collect();
 assert_eq!(tape2.len(), 3);
+
+// Binary data with BytesTape
+let mut bytes = BytesTapeI32::new();
+bytes.push(b"hi")?;
+assert_eq!(&bytes[0], b"hi");
+
 # Ok::<(), StringTapeError>(())
 ```
 
 ## Memory Layout
 
-StringTape uses the same memory layout as Apache Arrow string arrays:
+`CharsTape` and `BytesTape` use the same memory layout as Apache Arrow string and binary arrays:
 
 ```text
 Data buffer:    [h,e,l,l,o,w,o,r,l,d]
@@ -47,9 +54,9 @@ Offset buffer:  [0, 5, 10]
 ### Basic Operations
 
 ```rust
-use stringtape::StringTapeI32;
+use stringtape::CharsTapeI32;
 
-let mut tape = StringTapeI32::new();
+let mut tape = CharsTapeI32::new();
 tape.push("hello")?;                    // Append one string
 tape.extend(["world", "foo"])?;         // Append an array
 assert_eq!(&tape[0], "hello");          // Direct indexing
@@ -60,8 +67,10 @@ for s in &tape { // Iterate
 }
 
 // Construct from an iterator
-let tape2: StringTapeI32 = ["a", "b", "c"].into_iter().collect();
+let tape2: CharsTapeI32 = ["a", "b", "c"].into_iter().collect();
 ```
+
+`BytesTape` provides the same interface for arbitrary byte slices.
 
 ### Views and Slicing
 
@@ -80,7 +89,7 @@ assert_eq!(&subview[0], "world");
 
 ```rust
 // Pre-allocate capacity
-let tape = StringTapeI32::with_capacity(1024, 100)?; // 1KB data, 100 strings
+let tape = CharsTapeI32::with_capacity(1024, 100)?; // 1KB data, 100 strings
 
 // Monitor usage
 println!("Items: {}, Data: {} bytes", tape.len(), tape.data_len());
@@ -91,7 +100,7 @@ tape.truncate(5);       // Keep first 5 items
 
 // Custom allocators
 use allocator_api2::alloc::Global;
-let tape = StringTape::new_in(Global);
+let tape = CharsTape::new_in(Global);
 ```
 
 ### Apache Arrow Interop
@@ -99,7 +108,7 @@ let tape = StringTape::new_in(Global);
 True zero-copy conversion to/from Arrow arrays:
 
 ```rust
-// StringTape → Arrow (zero-copy)
+// CharsTape → Arrow (zero-copy)
 let (data_slice, offsets_slice) = tape.arrow_slices();
 let data_buffer = Buffer::from_slice_ref(data_slice);
 let offsets_buffer = OffsetBuffer::new(ScalarBuffer::new(
@@ -107,23 +116,25 @@ let offsets_buffer = OffsetBuffer::new(ScalarBuffer::new(
 ));
 let arrow_array = StringArray::new(offsets_buffer, data_buffer, None);
 
-// Arrow → StringTapeView (zero-copy)
+// Arrow → CharsTapeView (zero-copy)
 let view = unsafe {
-    StringTapeViewI32::from_raw_parts(
+    CharsTapeViewI32::from_raw_parts(
         arrow_array.values(),
         arrow_array.offsets().as_ref(),
     )
 };
 ```
 
+`BytesTape` works the same way with Arrow `BinaryArray`/`LargeBinaryArray` types.
+
 ### Unsigned Offsets
 
-In addition to the signed offsets (`i32`/`i64` via `StringTapeI32`/`StringTapeI64`),
+In addition to the signed offsets (`i32`/`i64` via `CharsTapeI32`/`CharsTapeI64`),
 the library also supports unsigned offsets (`u32`/`u64`) when you prefer non-negative indexing:
 
-- `StringTapeU32`, `StringTapeU64`
+- `CharsTapeU32`, `CharsTapeU64`
 - `BytesTapeU32`, `BytesTapeU64`
-- `StringTapeViewU32<'_>`, `StringTapeViewU64<'_>`
+- `CharsTapeViewU32<'_>`, `CharsTapeViewU64<'_>`
 - `BytesTapeViewU32<'_>`, `BytesTapeViewU64<'_>`
 
 Note, that unsigned offsets cannot be converted to/from Arrow arrays.
@@ -134,7 +145,7 @@ StringTape can be used in `no_std` environments:
 
 ```toml
 [dependencies]
-stringtape = { version = "0.1", default-features = false }
+stringtape = { version = "2", default-features = false }
 ```
 
 In `no_std` mode:
