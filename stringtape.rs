@@ -54,7 +54,7 @@ use alloc::{string::String, vec::Vec};
 use allocator_api2::alloc::{Allocator, Global, Layout};
 
 /// Errors that can occur when working with StringTape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StringTapeError {
     /// The string data size exceeds the maximum value representable by the offset type.
     ///
@@ -65,6 +65,8 @@ pub enum StringTapeError {
     AllocationError,
     /// Index is out of bounds for the current number of strings.
     IndexOutOfBounds,
+    /// Invalid UTF-8 sequence encountered.
+    Utf8Error(std::str::Utf8Error),
 }
 
 impl fmt::Display for StringTapeError {
@@ -73,6 +75,7 @@ impl fmt::Display for StringTapeError {
             StringTapeError::OffsetOverflow => write!(f, "offset value too large for offset type"),
             StringTapeError::AllocationError => write!(f, "memory allocation failed"),
             StringTapeError::IndexOutOfBounds => write!(f, "index out of bounds"),
+            StringTapeError::Utf8Error(e) => write!(f, "invalid UTF-8: {}", e),
         }
     }
 }
@@ -1514,6 +1517,58 @@ pub type StringTapeViewU64<'a> = StringTapeView<'a, u64>;
 pub type BytesTapeViewU32<'a> = BytesTapeView<'a, u32>;
 pub type BytesTapeViewU64<'a> = BytesTapeView<'a, u64>;
 
+// Conversion implementations between BytesTape and StringTape
+impl<Offset: OffsetType, A: Allocator> TryFrom<BytesTape<Offset, A>> for StringTape<Offset, A> {
+    type Error = StringTapeError;
+
+    fn try_from(bytes_tape: BytesTape<Offset, A>) -> Result<Self, Self::Error> {
+        // Validate that all byte sequences are valid UTF-8
+        for i in 0..bytes_tape.len() {
+            if let Err(e) = std::str::from_utf8(&bytes_tape[i]) {
+                return Err(StringTapeError::Utf8Error(e));
+            }
+        }
+
+        // Since validation passed, we can safely convert
+        // We need to take ownership of the inner RawTape without dropping BytesTape
+        let inner = unsafe {
+            // Take ownership of the inner RawTape
+            let inner = std::ptr::read(&bytes_tape.inner);
+            // Prevent BytesTape's destructor from running
+            std::mem::forget(bytes_tape);
+            inner
+        };
+        Ok(StringTape { inner })
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> From<StringTape<Offset, A>> for BytesTape<Offset, A> {
+    fn from(string_tape: StringTape<Offset, A>) -> Self {
+        // StringTape already contains valid UTF-8, so conversion to BytesTape is infallible
+        // We need to take ownership of the inner RawTape without dropping StringTape
+        let inner = unsafe {
+            // Take ownership of the inner RawTape
+            let inner = std::ptr::read(&string_tape.inner);
+            // Prevent StringTape's destructor from running
+            std::mem::forget(string_tape);
+            inner
+        };
+        BytesTape { inner }
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
+    pub fn try_into_string_tape(self) -> Result<StringTape<Offset, A>, StringTapeError> {
+        self.try_into()
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> StringTape<Offset, A> {
+    pub fn into_bytes_tape(self) -> BytesTape<Offset, A> {
+        self.into()
+    }
+}
+
 impl<Offset: OffsetType> Default for StringTape<Offset, Global> {
     fn default() -> Self {
         Self::new()
@@ -2052,5 +2107,96 @@ mod tests {
         assert_eq!(view.get(0), Some("hello"));
         assert_eq!(view.get(1), Some(""));
         assert_eq!(view.get(2), Some("world"));
+    }
+
+    #[test]
+    fn bytes_to_string_conversion() {
+        // Test successful conversion with valid UTF-8
+        let mut bytes_tape = BytesTapeI32::new();
+        bytes_tape.push(b"hello").unwrap();
+        bytes_tape.push(b"world").unwrap();
+        bytes_tape.push(b"").unwrap();
+        bytes_tape.push(b"rust").unwrap();
+
+        let string_tape: Result<StringTapeI32, _> = bytes_tape.try_into();
+        assert!(string_tape.is_ok());
+
+        let string_tape = string_tape.unwrap();
+        assert_eq!(string_tape.len(), 4);
+        assert_eq!(string_tape.get(0), Some("hello"));
+        assert_eq!(string_tape.get(1), Some("world"));
+        assert_eq!(string_tape.get(2), Some(""));
+        assert_eq!(string_tape.get(3), Some("rust"));
+    }
+
+    #[test]
+    fn bytes_to_string_invalid_utf8() {
+        // Test conversion failure with invalid UTF-8
+        let mut bytes_tape = BytesTapeI32::new();
+        bytes_tape.push(b"valid").unwrap();
+        bytes_tape.push(&[0xFF, 0xFE]).unwrap(); // Invalid UTF-8 sequence
+        bytes_tape.push(b"also valid").unwrap();
+
+        let string_tape: Result<StringTapeI32, _> = bytes_tape.try_into();
+        assert!(string_tape.is_err());
+
+        match string_tape {
+            Err(StringTapeError::Utf8Error(_)) => {}
+            _ => panic!("Expected Utf8Error"),
+        }
+    }
+
+    #[test]
+    fn string_to_bytes_conversion() {
+        // Test infallible conversion from StringTape to BytesTape
+        let mut string_tape = StringTapeI32::new();
+        string_tape.push("hello").unwrap();
+        string_tape.push("世界").unwrap(); // Unicode characters
+        string_tape.push("").unwrap();
+        string_tape.push("🦀").unwrap(); // Emoji
+
+        let bytes_tape: BytesTapeI32 = string_tape.into();
+        assert_eq!(bytes_tape.len(), 4);
+        assert_eq!(&bytes_tape[0], b"hello");
+        assert_eq!(&bytes_tape[1], "世界".as_bytes());
+        assert_eq!(&bytes_tape[2], b"");
+        assert_eq!(&bytes_tape[3], "🦀".as_bytes());
+    }
+
+    #[test]
+    fn conversion_convenience_methods() {
+        // Test try_into_string_tape method
+        let mut bytes_tape = BytesTapeI32::new();
+        bytes_tape.push(b"test").unwrap();
+        let string_result = bytes_tape.try_into_string_tape();
+        assert!(string_result.is_ok());
+        assert_eq!(string_result.unwrap().get(0), Some("test"));
+
+        // Test into_bytes_tape method
+        let mut string_tape = StringTapeI32::new();
+        string_tape.push("test").unwrap();
+        let bytes_back = string_tape.into_bytes_tape();
+        assert_eq!(&bytes_back[0], b"test");
+    }
+
+    #[test]
+    fn conversion_round_trip() {
+        // Test round-trip conversion preserves data
+        let mut original = StringTapeI32::new();
+        original.push("first").unwrap();
+        original.push("second").unwrap();
+        original.push("third").unwrap();
+
+        // Store expected values before conversion
+        let expected = vec!["first", "second", "third"];
+
+        // Convert to BytesTape and back
+        let bytes: BytesTapeI32 = original.into();
+        let recovered: StringTapeI32 = bytes.try_into().unwrap();
+
+        assert_eq!(expected.len(), recovered.len());
+        for (i, expected_str) in expected.iter().enumerate() {
+            assert_eq!(recovered.get(i), Some(*expected_str));
+        }
     }
 }
