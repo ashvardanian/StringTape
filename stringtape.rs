@@ -694,18 +694,6 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
         RawTapeView::new(self, start, end)
     }
 
-    /// Helper to get offset at index
-    fn get_offset(&self, index: usize) -> Result<Offset, StringTapeError> {
-        if index > self.len_items {
-            return Err(StringTapeError::IndexOutOfBounds);
-        }
-
-        if let Some(offsets_ptr) = self.offsets {
-            unsafe { Ok(*offsets_ptr.as_ptr().cast::<Offset>().add(index)) }
-        } else {
-            Ok(Offset::default())
-        }
-    }
 }
 
 impl<Offset: OffsetType, A: Allocator> Drop for RawTape<Offset, A> {
@@ -810,20 +798,9 @@ impl<'a, Offset: OffsetType> RawTapeView<'a, Offset> {
             _ => return Err(StringTapeError::IndexOutOfBounds),
         };
 
-        let base_offset = if start == 0 {
-            0
-        } else {
-            tape.get_offset(start)?.to_usize()
-        };
-
-        let end_offset = tape.get_offset(end)?.to_usize();
-
-        let data = unsafe {
-            slice::from_raw_parts(
-                data_ptr.as_ptr().cast::<u8>().add(base_offset),
-                end_offset - base_offset,
-            )
-        };
+        // Keep the data pointer at the beginning of the parent tape to remain Arrow-compatible.
+        // Offsets remain absolute (not normalized) and are sliced to the requested range.
+        let data = unsafe { slice::from_raw_parts(data_ptr.as_ptr().cast::<u8>(), tape.len_bytes) };
 
         let offsets = unsafe {
             slice::from_raw_parts(
@@ -854,12 +831,8 @@ impl<'a, Offset: OffsetType> RawTapeView<'a, Offset> {
             return None;
         }
 
-        let start_offset = if index == 0 {
-            0
-        } else {
-            (self.offsets[index] - self.offsets[0]).to_usize()
-        };
-        let end_offset = (self.offsets[index + 1] - self.offsets[0]).to_usize();
+        let start_offset = self.offsets[index].to_usize();
+        let end_offset = self.offsets[index + 1].to_usize();
 
         Some(&self.data[start_offset..end_offset])
     }
@@ -876,7 +849,8 @@ impl<'a, Offset: OffsetType> RawTapeView<'a, Offset> {
 
     /// Returns the total number of bytes in this view.
     pub fn data_len(&self) -> usize {
-        self.data.len()
+        // Span covered by this view
+        self.offsets[self.offsets.len() - 1].to_usize() - self.offsets[0].to_usize()
     }
 
     /// Creates a sub-view of this view
@@ -889,25 +863,21 @@ impl<'a, Offset: OffsetType> RawTapeView<'a, Offset> {
             return Err(StringTapeError::IndexOutOfBounds);
         }
 
-        let base_in_data = if start == 0 {
-            0
-        } else {
-            (self.offsets[start] - self.offsets[0]).to_usize()
-        };
-        let end_in_data = (self.offsets[end] - self.offsets[0]).to_usize();
-
         Ok(RawTapeView {
-            data: &self.data[base_in_data..end_in_data],
+            // Keep same data pointer, only narrow the offsets slice
+            data: self.data,
             offsets: &self.offsets[start..=end],
         })
     }
 
     /// Returns the raw parts of the view for Apache Arrow compatibility.
     pub fn as_raw_parts(&self) -> RawParts<Offset> {
+        // Expose an Arrow-compatible view: data_ptr remains at the tape base,
+        // offsets are absolute into that buffer, and data_len reaches the last used byte.
         RawParts {
             data_ptr: self.data.as_ptr(),
             offsets_ptr: self.offsets.as_ptr(),
-            data_len: self.data_len(),
+            data_len: self.offsets[self.offsets.len() - 1].to_usize(),
             items_count: self.len(),
         }
     }
@@ -929,7 +899,9 @@ impl<'a, Offset: OffsetType> Index<Range<usize>> for RawTapeView<'a, Offset> {
         let view = self
             .subview(range.start, range.end)
             .expect("range out of bounds");
-        view.data
+        let start = view.offsets[0].to_usize();
+        let end = view.offsets[view.offsets.len() - 1].to_usize();
+        &view.data[start..end]
     }
 }
 
@@ -940,7 +912,9 @@ impl<'a, Offset: OffsetType> Index<RangeFrom<usize>> for RawTapeView<'a, Offset>
         let view = self
             .subview(range.start, self.len())
             .expect("range out of bounds");
-        view.data
+        let start = view.offsets[0].to_usize();
+        let end = view.offsets[view.offsets.len() - 1].to_usize();
+        &view.data[start..end]
     }
 }
 
@@ -949,7 +923,9 @@ impl<'a, Offset: OffsetType> Index<RangeTo<usize>> for RawTapeView<'a, Offset> {
 
     fn index(&self, range: RangeTo<usize>) -> &Self::Output {
         let view = self.subview(0, range.end).expect("range out of bounds");
-        view.data
+        let start = view.offsets[0].to_usize();
+        let end = view.offsets[view.offsets.len() - 1].to_usize();
+        &view.data[start..end]
     }
 }
 
@@ -957,7 +933,9 @@ impl<'a, Offset: OffsetType> Index<RangeFull> for RawTapeView<'a, Offset> {
     type Output = [u8];
 
     fn index(&self, _range: RangeFull) -> &Self::Output {
-        self.data
+        let start = self.offsets[0].to_usize();
+        let end = self.offsets[self.offsets.len() - 1].to_usize();
+        &self.data[start..end]
     }
 }
 
@@ -968,7 +946,9 @@ impl<'a, Offset: OffsetType> Index<RangeInclusive<usize>> for RawTapeView<'a, Of
         let view = self
             .subview(*range.start(), range.end() + 1)
             .expect("range out of bounds");
-        view.data
+        let start = view.offsets[0].to_usize();
+        let end = view.offsets[view.offsets.len() - 1].to_usize();
+        &view.data[start..end]
     }
 }
 
@@ -977,7 +957,9 @@ impl<'a, Offset: OffsetType> Index<RangeToInclusive<usize>> for RawTapeView<'a, 
 
     fn index(&self, range: RangeToInclusive<usize>) -> &Self::Output {
         let view = self.subview(0, range.end + 1).expect("range out of bounds");
-        view.data
+        let start = view.offsets[0].to_usize();
+        let end = view.offsets[view.offsets.len() - 1].to_usize();
+        &view.data[start..end]
     }
 }
 
@@ -2003,6 +1985,60 @@ mod tests {
         assert!(!parts.offsets_ptr.is_null());
         assert_eq!(parts.data_len, 8); // "test" + "data"
         assert_eq!(parts.items_count, 2);
+    }
+
+    #[test]
+    fn subview_raw_parts_consistency_chars() {
+        let mut tape = CharsTapeI32::new();
+        tape.extend(["abc", "", "xyz", "pq"]).unwrap();
+
+        // Subview over middle two items: ["", "xyz"]
+        let view = tape.subview(1, 3).unwrap();
+        let parts = view.as_raw_parts();
+
+        // Offsets len must be items_count + 1 and data_len equals absolute last offset
+        unsafe {
+            let offsets: &[i32] =
+                core::slice::from_raw_parts(parts.offsets_ptr, parts.items_count + 1);
+            assert_eq!(offsets.len(), parts.items_count + 1);
+            assert!(offsets.windows(2).all(|w| w[0] <= w[1]));
+            let last_abs = offsets[offsets.len() - 1] as usize;
+            assert_eq!(last_abs, parts.data_len);
+        }
+
+        // Also check that element boundaries are respected
+        assert_eq!(view.len(), 2);
+        assert_eq!(view.get(0), Some(""));
+        assert_eq!(view.get(1), Some("xyz"));
+    }
+
+    #[test]
+    fn subview_raw_parts_consistency_bytes() {
+        let mut tape = BytesTapeI32::new();
+        tape.extend([
+            b"a".as_slice(),
+            b"".as_slice(),
+            b"bc".as_slice(),
+            b"def".as_slice(),
+        ])
+        .unwrap();
+
+        // Subview over last two items: ["bc", "def"]
+        let view = tape.subview(2, 4).unwrap();
+        let parts = view.as_raw_parts();
+
+        unsafe {
+            let offsets: &[i32] =
+                core::slice::from_raw_parts(parts.offsets_ptr, parts.items_count + 1);
+            assert_eq!(offsets.len(), parts.items_count + 1);
+            assert!(offsets.windows(2).all(|w| w[0] <= w[1]));
+            let last_abs = offsets[offsets.len() - 1] as usize;
+            assert_eq!(last_abs, parts.data_len);
+        }
+
+        assert_eq!(view.len(), 2);
+        assert_eq!(view.get(0), Some(b"bc" as &[u8]));
+        assert_eq!(view.get(1), Some(b"def" as &[u8]));
     }
 
     #[test]
