@@ -1098,13 +1098,55 @@ impl<'a, Offset: OffsetType> CharsTapeView<'a, Offset> {
     pub fn as_raw_parts(&self) -> RawParts<Offset> {
         self.inner.as_raw_parts()
     }
+
+    /// Returns an iterator over the strings in this view.
+    pub fn iter(&'a self) -> CharsTapeViewIter<'a, Offset> {
+        CharsTapeViewIter {
+            view: self,
+            index: 0,
+        }
+    }
 }
+
+/// Iterator over CharsTapeView strings.
+pub struct CharsTapeViewIter<'a, Offset: OffsetType> {
+    view: &'a CharsTapeView<'a, Offset>,
+    index: usize,
+}
+
+impl<'a, Offset: OffsetType> Iterator for CharsTapeViewIter<'a, Offset> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let result = self.view.get(self.index);
+        if result.is_some() {
+            self.index += 1;
+        }
+        result
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.view.len() - self.index;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'a, Offset: OffsetType> ExactSizeIterator for CharsTapeViewIter<'a, Offset> {}
 
 impl<'a, Offset: OffsetType> Index<usize> for CharsTapeView<'a, Offset> {
     type Output = str;
 
     fn index(&self, index: usize) -> &Self::Output {
         self.get(index).expect("index out of bounds")
+    }
+}
+
+impl<'a, Offset: OffsetType> IntoIterator for &'a CharsTapeView<'a, Offset> {
+    type Item = &'a str;
+    type IntoIter = CharsTapeViewIter<'a, Offset>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
@@ -1162,13 +1204,55 @@ impl<'a, Offset: OffsetType> BytesTapeView<'a, Offset> {
     pub fn as_raw_parts(&self) -> RawParts<Offset> {
         self.inner.as_raw_parts()
     }
+
+    /// Returns an iterator over the byte slices in this view.
+    pub fn iter(&'a self) -> BytesTapeViewIter<'a, Offset> {
+        BytesTapeViewIter {
+            view: self,
+            index: 0,
+        }
+    }
 }
+
+/// Iterator over BytesTapeView byte slices.
+pub struct BytesTapeViewIter<'a, Offset: OffsetType> {
+    view: &'a BytesTapeView<'a, Offset>,
+    index: usize,
+}
+
+impl<'a, Offset: OffsetType> Iterator for BytesTapeViewIter<'a, Offset> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let result = self.view.get(self.index);
+        if result.is_some() {
+            self.index += 1;
+        }
+        result
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.view.len() - self.index;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'a, Offset: OffsetType> ExactSizeIterator for BytesTapeViewIter<'a, Offset> {}
 
 impl<'a, Offset: OffsetType> Index<usize> for BytesTapeView<'a, Offset> {
     type Output = [u8];
 
     fn index(&self, index: usize) -> &Self::Output {
         self.get(index).expect("index out of bounds")
+    }
+}
+
+impl<'a, Offset: OffsetType> IntoIterator for &'a BytesTapeView<'a, Offset> {
+    type Item = &'a [u8];
+    type IntoIter = BytesTapeViewIter<'a, Offset>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
