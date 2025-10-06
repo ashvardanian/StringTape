@@ -1928,6 +1928,28 @@ impl<'a, Offset: OffsetType, Length: LengthType> CharsCows<'a, Offset, Length> {
         &self.data
     }
 
+    /// Returns a reference to the parent string that all slices reference.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::CharsCowsU32U8;
+    /// use std::borrow::Cow;
+    ///
+    /// let data = "hello world";
+    /// let cows = CharsCowsU32U8::from_iter_and_data(
+    ///     data.split_whitespace(),
+    ///     Cow::Borrowed(data.as_bytes())
+    /// ).unwrap();
+    ///
+    /// assert_eq!(cows.parent(), "hello world");
+    /// # Ok::<(), stringtape::StringTapeError>(())
+    /// ```
+    pub fn parent(&self) -> &str {
+        // Safety: CharsCows is constructed with valid UTF-8 data
+        unsafe { core::str::from_utf8_unchecked(&self.data) }
+    }
+
     /// Sorts the slices in-place using the default string comparison.
     ///
     /// This is a stable sort that preserves the order of equal elements.
@@ -2166,6 +2188,29 @@ impl<'a, Offset: OffsetType, Length: LengthType> BytesCows<'a, Offset, Length> {
 
     /// Returns a reference to the underlying data buffer.
     pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// Returns a reference to the parent byte buffer that all slices reference.
+    ///
+    /// This is an alias for `data()` that provides a consistent API across all Cows types.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::BytesCowsU32U8;
+    /// use std::borrow::Cow;
+    ///
+    /// let data = b"hello world";
+    /// let bytes = BytesCowsU32U8::from_iter_and_data(
+    ///     data.split(|&b| b == b' '),
+    ///     Cow::Borrowed(&data[..])
+    /// ).unwrap();
+    ///
+    /// assert_eq!(bytes.parent(), b"hello world");
+    /// # Ok::<(), stringtape::StringTapeError>(())
+    /// ```
+    pub fn parent(&self) -> &[u8] {
         &self.data
     }
 
@@ -2675,6 +2720,62 @@ impl<'a> CharsCowsAuto<'a> {
         }
     }
 
+    /// Returns a reference to the underlying data buffer.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::CharsCowsAuto;
+    /// use std::borrow::Cow;
+    ///
+    /// let data = "hello world";
+    /// let cows = CharsCowsAuto::from_iter_and_data(
+    ///     data.split_whitespace(),
+    ///     Cow::Borrowed(data.as_bytes())
+    /// ).unwrap();
+    ///
+    /// assert_eq!(cows.data(), b"hello world");
+    /// # Ok::<(), stringtape::StringTapeError>(())
+    /// ```
+    pub fn data(&self) -> &[u8] {
+        match self {
+            Self::U32U8(s) => s.data(),
+            Self::U32U16(s) => s.data(),
+            Self::U32U32(s) => s.data(),
+            Self::U64U8(s) => s.data(),
+            Self::U64U16(s) => s.data(),
+            Self::U64U32(s) => s.data(),
+        }
+    }
+
+    /// Returns a reference to the parent string that all slices reference.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::CharsCowsAuto;
+    /// use std::borrow::Cow;
+    ///
+    /// let data = "hello world";
+    /// let cows = CharsCowsAuto::from_iter_and_data(
+    ///     data.split_whitespace(),
+    ///     Cow::Borrowed(data.as_bytes())
+    /// ).unwrap();
+    ///
+    /// assert_eq!(cows.parent(), "hello world");
+    /// # Ok::<(), stringtape::StringTapeError>(())
+    /// ```
+    pub fn parent(&self) -> &str {
+        match self {
+            Self::U32U8(s) => s.parent(),
+            Self::U32U16(s) => s.parent(),
+            Self::U32U32(s) => s.parent(),
+            Self::U64U8(s) => s.parent(),
+            Self::U64U16(s) => s.parent(),
+            Self::U64U32(s) => s.parent(),
+        }
+    }
+
     /// Returns a zero-copy view of this `CharsCowsAuto` as a `BytesCowsAuto`.
     ///
     /// This is a no-cost operation that reinterprets the string collection as bytes
@@ -2857,6 +2958,64 @@ impl<'a> BytesCowsAuto<'a> {
             Self::U64U8(s) => Ok(CharsCowsAuto::U64U8(s.as_chars()?)),
             Self::U64U16(s) => Ok(CharsCowsAuto::U64U16(s.as_chars()?)),
             Self::U64U32(s) => Ok(CharsCowsAuto::U64U32(s.as_chars()?)),
+        }
+    }
+
+    /// Returns a reference to the underlying data buffer.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::BytesCowsAuto;
+    /// use std::borrow::Cow;
+    ///
+    /// let data = b"hello world";
+    /// let bytes = BytesCowsAuto::from_iter_and_data(
+    ///     data.split(|&b| b == b' '),
+    ///     Cow::Borrowed(&data[..])
+    /// ).unwrap();
+    ///
+    /// assert_eq!(bytes.data(), b"hello world");
+    /// # Ok::<(), stringtape::StringTapeError>(())
+    /// ```
+    pub fn data(&self) -> &[u8] {
+        match self {
+            Self::U32U8(s) => s.data(),
+            Self::U32U16(s) => s.data(),
+            Self::U32U32(s) => s.data(),
+            Self::U64U8(s) => s.data(),
+            Self::U64U16(s) => s.data(),
+            Self::U64U32(s) => s.data(),
+        }
+    }
+
+    /// Returns a reference to the parent byte buffer that all slices reference.
+    ///
+    /// This is an alias for `data()` that provides a consistent API across all Cows types.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::BytesCowsAuto;
+    /// use std::borrow::Cow;
+    ///
+    /// let data = b"hello world";
+    /// let bytes = BytesCowsAuto::from_iter_and_data(
+    ///     data.split(|&b| b == b' '),
+    ///     Cow::Borrowed(&data[..])
+    /// ).unwrap();
+    ///
+    /// assert_eq!(bytes.parent(), b"hello world");
+    /// # Ok::<(), stringtape::StringTapeError>(())
+    /// ```
+    pub fn parent(&self) -> &[u8] {
+        match self {
+            Self::U32U8(s) => s.parent(),
+            Self::U32U16(s) => s.parent(),
+            Self::U32U32(s) => s.parent(),
+            Self::U64U8(s) => s.parent(),
+            Self::U64U16(s) => s.parent(),
+            Self::U64U32(s) => s.parent(),
         }
     }
 
