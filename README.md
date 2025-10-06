@@ -19,14 +19,14 @@ let buffers = words.map(str::as_bytes);
 let _ = Vec::<String>::from_iter(words);        // + 7.1 GB copied ❌
 let _ = CharsTapeAuto::from_iter(words);        // + 1.3 GB copied ✅
 let _ = Vec::<&[u8]>::from_iter(buffers);       // + 1.9 GB copy-less ⚠️
-let _ = BytesSlicesAuto::from_iter_and_data(    // + 0.7 GB copy-less ✅
+let _ = BytesCowsAuto::from_iter_and_data(      // + 0.7 GB copy-less ✅
     buffers,
     Cow::Borrowed(doc.as_bytes()),
 );
 ```
 
-Tape classes copy data into contiguous buffers for cache-friendly iteration.
-Slices classes reference existing data without copies.
+"Tape" classes copy data into contiguous buffers for cache-friendly iteration.
+"Cows" classes reference existing data without copies.
 
 ## Quick Start
 
@@ -53,7 +53,7 @@ assert_eq!(tape2.len(), 3);
 
 // Zero-copy slices referencing existing data
 let data = "hello world";
-let slices = CharsSlicesAuto::from_iter_and_data(
+let cows = CharsCowsAuto::from_iter_and_data(
     data.split_whitespace(),
     Cow::Borrowed(data.as_bytes()),
 )?;
@@ -95,7 +95,7 @@ tape.sort();
 tape.sort_by(|a, b| a.len().cmp(&b.len()));
 ```
 
-`BytesTape` and `CharsSlicesAuto`/`BytesSlicesAuto` provide the same interface.
+`BytesTape` and `CharsCowsAuto`/`BytesCowsAuto` provide the same interface.
 
 ### Views and Slicing
 
@@ -160,11 +160,11 @@ Auto variants automatically select the most memory-efficient types based on data
 // CharsTapeAuto: selects I32/U32/U64 offset based on total data size
 let tape = CharsTapeAuto::from_iter(strings);
 
-// CharsSlicesAuto: selects offset (U32/U64) and length (U8/U16/U32) types
-let slices = CharsSlicesAuto::from_iter_and_data(strings, data)?;
+// CharsCowsAuto: selects offset (U32/U64) and length (U8/U16/U32) types
+let cows = CharsCowsAuto::from_iter_and_data(strings, data)?;
 ```
 
-Available: `CharsTapeAuto`, `BytesTapeAuto`, `CharsSlicesAuto`, `BytesSlicesAuto`.
+Available: `CharsTapeAuto`, `BytesTapeAuto`, `CharsCowsAuto`, `BytesCowsAuto`.
 
 ### Unsigned Offsets
 
@@ -204,6 +204,6 @@ To reproduce memory usage numbers mentioned above, run:
 ```bash
 /usr/bin/time -f "Vec<String>: %M KB | %E" cargo run --release --quiet --bin bench_vec_string -- enwik9.txt
 /usr/bin/time -f "Vec<&[u8]>: %M KB | %E" cargo run --release --quiet --bin bench_vec_slice -- enwik9.txt
-/usr/bin/time -f "CharsSlicesAuto: %M KB | %E" cargo run --release --quiet --bin bench_chars_slices -- enwik9.txt
+/usr/bin/time -f "CharsCowsAuto: %M KB | %E" cargo run --release --quiet --bin bench_chars_slices -- enwik9.txt
 /usr/bin/time -f "CharsTapeAuto: %M KB | %E" cargo run --release --quiet --bin bench_chars_tape -- enwik9.txt
 ```

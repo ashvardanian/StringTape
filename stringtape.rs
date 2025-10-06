@@ -23,23 +23,23 @@
 //! # Ok::<(), StringTapeError>(())
 //! ```
 //!
-//! ## CharsSlices - Compressed Arbitrary-Order Slices
+//! ## CharsCows - Compressed Arbitrary-Order Slices
 //!
-//! For extremely large datasets, use `CharsSlices` with configurable offset/length types:
+//! For extremely large datasets, use `CharsCows` with configurable offset/length types:
 //!
 //! ```rust
-//! use stringtape::{CharsSlicesU32U16, StringTapeError};
+//! use stringtape::{CharsCowsU32U16, StringTapeError};
 //! use std::borrow::Cow;
 //!
 //! let data = "hello world foo bar";
 //! // 6 bytes per entry (u32 offset + u16 length) vs 24+ bytes for Vec<String>
-//! let slices = CharsSlicesU32U16::from_iter_and_data(
+//! let cows = CharsCowsU32U16::from_iter_and_data(
 //!     data.split_whitespace(),
 //!     Cow::Borrowed(data.as_bytes())
 //! )?;
 //!
-//! assert_eq!(&slices[0], "hello");
-//! assert_eq!(&slices[3], "bar");
+//! assert_eq!(&cows[0], "hello");
+//! assert_eq!(&cows[3], "bar");
 //! # Ok::<(), StringTapeError>(())
 //! ```
 //!
@@ -275,7 +275,7 @@ impl OffsetType for u64 {
 /// Trait for length types used in slice collections.
 ///
 /// This trait defines the interface for length types that can be used to represent
-/// the length of string slices. Implementations are provided for `u8`, `u16`, `u32`, and `u64`.
+/// the length of string cows. Implementations are provided for `u8`, `u16`, `u32`, and `u64`.
 pub trait LengthType: Copy + Default + PartialOrd {
     /// Size of the length type in bytes.
     const SIZE: usize;
@@ -1326,24 +1326,24 @@ impl<Offset: OffsetType, A: Allocator> CharsTape<Offset, A> {
         })
     }
 
-    /// Creates a CharsSlices view of the tape.
+    /// Creates a CharsCows view of the tape.
     ///
     /// # Example
     ///
     /// ```rust
-    /// # use stringtape::{CharsTapeI32, CharsSlices, StringTapeError};
+    /// # use stringtape::{CharsTapeI32, CharsCows, StringTapeError};
     /// # use std::borrow::Cow;
     /// let mut tape = CharsTapeI32::new();
     /// tape.extend(["apple", "banana", "cherry"])?;
     ///
-    /// let slices: CharsSlices<i32, u16> = tape.as_reorderable()?;
-    /// assert_eq!(slices.get(0), Some("apple"));
+    /// let cows: CharsCows<i32, u16> = tape.as_reorderable()?;
+    /// assert_eq!(cows.get(0), Some("apple"));
     /// # Ok::<(), StringTapeError>(())
     /// ```
     pub fn as_reorderable<Length: LengthType>(
         &self,
-    ) -> Result<CharsSlices<'_, Offset, Length>, StringTapeError> {
-        CharsSlices::from_iter_and_data(self, Cow::Borrowed(self.data_slice()))
+    ) -> Result<CharsCows<'_, Offset, Length>, StringTapeError> {
+        CharsCows::from_iter_and_data(self, Cow::Borrowed(self.data_slice()))
     }
 
     /// Returns data and offsets slices for zero-copy Arrow conversion.
@@ -1550,6 +1550,14 @@ impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
         }
     }
 
+    /// Returns an iterator over the byte cows.
+    pub fn iter(&self) -> BytesTapeIter<'_, Offset, A> {
+        BytesTapeIter {
+            tape: self,
+            index: 0,
+        }
+    }
+
     /// Creates a subview of a continuous slice of this BytesTape.
     pub fn subview(
         &self,
@@ -1561,34 +1569,26 @@ impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
         })
     }
 
-    /// Creates a BytesSlices view of the tape.
+    /// Creates a BytesCows view of the tape.
     ///
     /// # Example
     ///
     /// ```rust
-    /// # use stringtape::{BytesTapeI32, BytesSlices, StringTapeError};
+    /// # use stringtape::{BytesTapeI32, BytesCows, StringTapeError};
     /// # use std::borrow::Cow;
     /// let mut tape = BytesTapeI32::new();
     /// tape.push(&[1, 2, 3])?;
     /// tape.push(&[4, 5, 6])?;
     /// tape.push(&[7, 8, 9])?;
     ///
-    /// let slices: BytesSlices<i32, u16> = tape.as_reorderable()?;
-    /// assert_eq!(slices.get(0), Some(&[1, 2, 3][..]));
+    /// let cows: BytesCows<i32, u16> = tape.as_reorderable()?;
+    /// assert_eq!(cows.get(0), Some(&[1, 2, 3][..]));
     /// # Ok::<(), StringTapeError>(())
     /// ```
     pub fn as_reorderable<Length: LengthType>(
         &self,
-    ) -> Result<BytesSlices<'_, Offset, Length>, StringTapeError> {
-        let offsets = self.offsets_slice();
-        BytesSlices::from_iter_and_data(
-            (0..self.len()).map(|idx| {
-                let start = offsets[idx].to_usize();
-                let end = offsets[idx + 1].to_usize();
-                (start, end - start)
-            }),
-            Cow::Borrowed(self.data_slice()),
-        )
+    ) -> Result<BytesCows<'_, Offset, Length>, StringTapeError> {
+        BytesCows::from_iter_and_data(self, Cow::Borrowed(self.data_slice()))
     }
 
     /// Returns data and offsets slices for zero-copy Arrow conversion.
@@ -1602,6 +1602,39 @@ impl<Offset: OffsetType, A: Allocator> Index<usize> for BytesTape<Offset, A> {
 
     fn index(&self, index: usize) -> &Self::Output {
         self.get(index).expect("index out of bounds")
+    }
+}
+
+pub struct BytesTapeIter<'a, Offset: OffsetType, A: Allocator> {
+    tape: &'a BytesTape<Offset, A>,
+    index: usize,
+}
+
+impl<'a, Offset: OffsetType, A: Allocator> Iterator for BytesTapeIter<'a, Offset, A> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let result = self.tape.get(self.index);
+        if result.is_some() {
+            self.index += 1;
+        }
+        result
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.tape.len() - self.index;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'a, Offset: OffsetType, A: Allocator> ExactSizeIterator for BytesTapeIter<'a, Offset, A> {}
+
+impl<'a, Offset: OffsetType, A: Allocator> IntoIterator for &'a BytesTape<Offset, A> {
+    type Item = &'a [u8];
+    type IntoIter = BytesTapeIter<'a, Offset, A>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
@@ -1731,7 +1764,7 @@ impl<Offset: OffsetType> Default for CharsTape<Offset, Global> {
 }
 
 // ========================
-// CharsSlices - Compact slice collection with configurable offset/length types
+// CharsCows - Compact slice collection with configurable offset/length types
 // ========================
 
 /// Packed entry struct to eliminate padding overhead between offset and length.
@@ -1747,7 +1780,7 @@ struct PackedEntry<Offset, Length> {
 
 /// A memory-efficient collection of string slices with configurable offset and length types.
 ///
-/// `CharsSlices` stores references to string slices in a shared data buffer using compact
+/// `CharsCows` stores references to string slices in a shared data buffer using compact
 /// (offset, length) pairs. This is ideal for large datasets where you want to reference
 /// substrings without duplicating the underlying data.
 ///
@@ -1760,42 +1793,42 @@ struct PackedEntry<Offset, Length> {
 ///
 /// For 500M words (8 bytes avg) from a 4GB file:
 /// - `Vec<String>`: ~66 GB (24 bytes per String + heap overhead)
-/// - `CharsSlices<u32, u16>`: ~7 GB (4+2 bytes per entry + shared 4GB data)
+/// - `CharsCows<u32, u16>`: ~7 GB (4+2 bytes per entry + shared 4GB data)
 ///
 /// # Examples
 ///
 /// ```rust
-/// use stringtape::{CharsSlices, StringTapeError};
+/// use stringtape::{CharsCows, StringTapeError};
 /// use std::borrow::Cow;
 ///
 /// let data = "hello world foo bar";
-/// let slices = CharsSlices::<u32, u16>::from_iter_and_data(
+/// let cows = CharsCows::<u32, u16>::from_iter_and_data(
 ///     data.split_whitespace(),
 ///     Cow::Borrowed(data.as_bytes())
 /// )?;
 ///
-/// assert_eq!(slices.len(), 4);
-/// assert_eq!(slices.get(0), Some("hello"));
-/// assert_eq!(slices.get(3), Some("bar"));
+/// assert_eq!(cows.len(), 4);
+/// assert_eq!(cows.get(0), Some("hello"));
+/// assert_eq!(cows.get(3), Some("bar"));
 /// # Ok::<(), StringTapeError>(())
 /// ```
 #[derive(Debug, Clone)]
-pub struct CharsSlices<'a, Offset: OffsetType = u32, Length: LengthType = u16> {
+pub struct CharsCows<'a, Offset: OffsetType = u32, Length: LengthType = u16> {
     data: Cow<'a, [u8]>,
     entries: Vec<PackedEntry<Offset, Length>>,
 }
 
 /// A memory-efficient collection of byte slices with configurable offset and length types.
 ///
-/// Similar to `CharsSlices` but for arbitrary binary data without UTF-8 validation.
+/// Similar to `CharsCows` but for arbitrary binary data without UTF-8 validation.
 #[derive(Debug, Clone)]
-pub struct BytesSlices<'a, Offset: OffsetType = u32, Length: LengthType = u16> {
+pub struct BytesCows<'a, Offset: OffsetType = u32, Length: LengthType = u16> {
     data: Cow<'a, [u8]>,
     entries: Vec<PackedEntry<Offset, Length>>,
 }
 
-impl<'a, Offset: OffsetType, Length: LengthType> CharsSlices<'a, Offset, Length> {
-    /// Creates a CharsSlices from an iterator of string slices and shared data buffer.
+impl<'a, Offset: OffsetType, Length: LengthType> CharsCows<'a, Offset, Length> {
+    /// Creates a CharsCows from an iterator of string slices and shared data buffer.
     ///
     /// The slices must be subslices of the data buffer. Offsets and lengths are inferred
     /// from the slice pointers.
@@ -1813,10 +1846,10 @@ impl<'a, Offset: OffsetType, Length: LengthType> CharsSlices<'a, Offset, Length>
     /// # Example
     ///
     /// ```rust
-    /// # use stringtape::{CharsSlicesU32U8, StringTapeError};
+    /// # use stringtape::{CharsCowsU32U8, StringTapeError};
     /// # use std::borrow::Cow;
     /// let data = "hello world";
-    /// let slices = CharsSlicesU32U8::from_iter_and_data(
+    /// let cows = CharsCowsU32U8::from_iter_and_data(
     ///     data.split_whitespace(),
     ///     Cow::Borrowed(data.as_bytes())
     /// )?;
@@ -1877,14 +1910,14 @@ impl<'a, Offset: OffsetType, Length: LengthType> CharsSlices<'a, Offset, Length>
         self.entries.len()
     }
 
-    /// Returns `true` if the collection contains no slices.
+    /// Returns `true` if the collection contains no cows.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Returns an iterator over the string slices.
-    pub fn iter(&self) -> CharsSlicesIter<'_, Offset, Length> {
-        CharsSlicesIter {
+    /// Returns an iterator over the string cows.
+    pub fn iter(&self) -> CharsCowsIter<'_, Offset, Length> {
+        CharsCowsIter {
             slices: self,
             index: 0,
         }
@@ -1902,17 +1935,17 @@ impl<'a, Offset: OffsetType, Length: LengthType> CharsSlices<'a, Offset, Length>
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::CharsSlicesU32U8;
+    /// use stringtape::CharsCowsU32U8;
     /// use std::borrow::Cow;
     ///
     /// let data = "zebra apple banana";
-    /// let mut slices = CharsSlicesU32U8::from_iter_and_data(
+    /// let mut cows = CharsCowsU32U8::from_iter_and_data(
     ///     data.split_whitespace(),
     ///     Cow::Borrowed(data.as_bytes())
     /// ).unwrap();
     ///
-    /// slices.sort();
-    /// let sorted: Vec<&str> = slices.iter().collect();
+    /// cows.sort();
+    /// let sorted: Vec<&str> = cows.iter().collect();
     /// assert_eq!(sorted, vec!["apple", "banana", "zebra"]);
     /// # Ok::<(), stringtape::StringTapeError>(())
     /// ```
@@ -1964,18 +1997,18 @@ impl<'a, Offset: OffsetType, Length: LengthType> CharsSlices<'a, Offset, Length>
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::CharsSlicesU32U8;
+    /// use stringtape::CharsCowsU32U8;
     /// use std::borrow::Cow;
     ///
     /// let data = "aaa bb c";
-    /// let mut slices = CharsSlicesU32U8::from_iter_and_data(
+    /// let mut cows = CharsCowsU32U8::from_iter_and_data(
     ///     data.split_whitespace(),
     ///     Cow::Borrowed(data.as_bytes())
     /// ).unwrap();
     ///
     /// // Sort by length, then alphabetically
-    /// slices.sort_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)));
-    /// let sorted: Vec<&str> = slices.iter().collect();
+    /// cows.sort_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)));
+    /// let sorted: Vec<&str> = cows.iter().collect();
     /// assert_eq!(sorted, vec!["c", "bb", "aaa"]);
     /// # Ok::<(), stringtape::StringTapeError>(())
     /// ```
@@ -2005,18 +2038,18 @@ impl<'a, Offset: OffsetType, Length: LengthType> CharsSlices<'a, Offset, Length>
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::CharsSlicesU32U8;
+    /// use stringtape::CharsCowsU32U8;
     /// use std::borrow::Cow;
     ///
     /// let data = "aaa bb c";
-    /// let mut slices = CharsSlicesU32U8::from_iter_and_data(
+    /// let mut cows = CharsCowsU32U8::from_iter_and_data(
     ///     data.split_whitespace(),
     ///     Cow::Borrowed(data.as_bytes())
     /// ).unwrap();
     ///
     /// // Sort by string length
-    /// slices.sort_by_key(|s| s.len());
-    /// let sorted: Vec<&str> = slices.iter().collect();
+    /// cows.sort_by_key(|s| s.len());
+    /// let sorted: Vec<&str> = cows.iter().collect();
     /// assert_eq!(sorted, vec!["c", "bb", "aaa"]);
     /// # Ok::<(), stringtape::StringTapeError>(())
     /// ```
@@ -2036,18 +2069,49 @@ impl<'a, Offset: OffsetType, Length: LengthType> CharsSlices<'a, Offset, Length>
     }
 }
 
-impl<'a, Offset: OffsetType, Length: LengthType> BytesSlices<'a, Offset, Length> {
-    /// Creates a new BytesSlices from an iterator of (offset, length) pairs and a data buffer.
+impl<'a, Offset: OffsetType, Length: LengthType> BytesCows<'a, Offset, Length> {
+    /// Creates BytesCows from iterator of byte slices and shared data buffer.
     ///
-    /// # Arguments
-    ///
-    /// * `iter` - Iterator yielding (offset, length) pairs as (usize, usize)
-    /// * `data` - Cow-wrapped data buffer (borrowed or owned)
-    ///
-    /// # Errors
-    ///
-    /// Returns `OffsetOverflow` if any offset/length exceeds the type's maximum value.
+    /// Slices must be subslices of the data buffer. Offsets and lengths are inferred
+    /// from slice pointers.
     pub fn from_iter_and_data<I>(iter: I, data: Cow<'a, [u8]>) -> Result<Self, StringTapeError>
+    where
+        I: IntoIterator,
+        I::Item: AsRef<[u8]>,
+    {
+        let data_ptr = data.as_ptr() as usize;
+        let data_end = data_ptr + data.len();
+        let mut entries = Vec::new();
+
+        for b in iter {
+            let b_ref = b.as_ref();
+            let b_ptr = b_ref.as_ptr() as usize;
+
+            if b_ptr < data_ptr || b_ptr > data_end {
+                return Err(StringTapeError::IndexOutOfBounds);
+            }
+
+            let offset = b_ptr - data_ptr;
+            let length = b_ref.len();
+
+            if offset + length > data.len() {
+                return Err(StringTapeError::IndexOutOfBounds);
+            }
+
+            let offset_typed = Offset::from_usize(offset).ok_or(StringTapeError::OffsetOverflow)?;
+            let length_typed = Length::from_usize(length).ok_or(StringTapeError::OffsetOverflow)?;
+
+            entries.push(PackedEntry {
+                offset: offset_typed,
+                length: length_typed,
+            });
+        }
+
+        Ok(Self { data, entries })
+    }
+
+    /// Creates BytesCows from iterator of (offset, length) pairs and data buffer.
+    pub fn from_offsets_and_data<I>(iter: I, data: Cow<'a, [u8]>) -> Result<Self, StringTapeError>
     where
         I: IntoIterator<Item = (usize, usize)>,
     {
@@ -2057,7 +2121,6 @@ impl<'a, Offset: OffsetType, Length: LengthType> BytesSlices<'a, Offset, Length>
             let offset_typed = Offset::from_usize(offset).ok_or(StringTapeError::OffsetOverflow)?;
             let length_typed = Length::from_usize(length).ok_or(StringTapeError::OffsetOverflow)?;
 
-            // Validate bounds
             let end = offset
                 .checked_add(length)
                 .ok_or(StringTapeError::OffsetOverflow)?;
@@ -2088,14 +2151,14 @@ impl<'a, Offset: OffsetType, Length: LengthType> BytesSlices<'a, Offset, Length>
         self.entries.len()
     }
 
-    /// Returns `true` if the collection contains no slices.
+    /// Returns `true` if the collection contains no cows.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Returns an iterator over the byte slices.
-    pub fn iter(&self) -> BytesSlicesIter<'_, Offset, Length> {
-        BytesSlicesIter {
+    /// Returns an iterator over the byte cows.
+    pub fn iter(&self) -> BytesCowsIter<'_, Offset, Length> {
+        BytesCowsIter {
             slices: self,
             index: 0,
         }
@@ -2107,12 +2170,12 @@ impl<'a, Offset: OffsetType, Length: LengthType> BytesSlices<'a, Offset, Length>
     }
 }
 
-pub struct CharsSlicesIter<'a, Offset: OffsetType, Length: LengthType> {
-    slices: &'a CharsSlices<'a, Offset, Length>,
+pub struct CharsCowsIter<'a, Offset: OffsetType, Length: LengthType> {
+    slices: &'a CharsCows<'a, Offset, Length>,
     index: usize,
 }
 
-impl<'a, Offset: OffsetType, Length: LengthType> Iterator for CharsSlicesIter<'a, Offset, Length> {
+impl<'a, Offset: OffsetType, Length: LengthType> Iterator for CharsCowsIter<'a, Offset, Length> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -2130,16 +2193,16 @@ impl<'a, Offset: OffsetType, Length: LengthType> Iterator for CharsSlicesIter<'a
 }
 
 impl<'a, Offset: OffsetType, Length: LengthType> ExactSizeIterator
-    for CharsSlicesIter<'a, Offset, Length>
+    for CharsCowsIter<'a, Offset, Length>
 {
 }
 
-pub struct BytesSlicesIter<'a, Offset: OffsetType, Length: LengthType> {
-    slices: &'a BytesSlices<'a, Offset, Length>,
+pub struct BytesCowsIter<'a, Offset: OffsetType, Length: LengthType> {
+    slices: &'a BytesCows<'a, Offset, Length>,
     index: usize,
 }
 
-impl<'a, Offset: OffsetType, Length: LengthType> Iterator for BytesSlicesIter<'a, Offset, Length> {
+impl<'a, Offset: OffsetType, Length: LengthType> Iterator for BytesCowsIter<'a, Offset, Length> {
     type Item = &'a [u8];
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -2157,11 +2220,11 @@ impl<'a, Offset: OffsetType, Length: LengthType> Iterator for BytesSlicesIter<'a
 }
 
 impl<'a, Offset: OffsetType, Length: LengthType> ExactSizeIterator
-    for BytesSlicesIter<'a, Offset, Length>
+    for BytesCowsIter<'a, Offset, Length>
 {
 }
 
-impl<'a, Offset: OffsetType, Length: LengthType> Index<usize> for CharsSlices<'a, Offset, Length> {
+impl<'a, Offset: OffsetType, Length: LengthType> Index<usize> for CharsCows<'a, Offset, Length> {
     type Output = str;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -2169,7 +2232,7 @@ impl<'a, Offset: OffsetType, Length: LengthType> Index<usize> for CharsSlices<'a
     }
 }
 
-impl<'a, Offset: OffsetType, Length: LengthType> Index<usize> for BytesSlices<'a, Offset, Length> {
+impl<'a, Offset: OffsetType, Length: LengthType> Index<usize> for BytesCows<'a, Offset, Length> {
     type Output = [u8];
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -2178,10 +2241,10 @@ impl<'a, Offset: OffsetType, Length: LengthType> Index<usize> for BytesSlices<'a
 }
 
 impl<'a, Offset: OffsetType, Length: LengthType> IntoIterator
-    for &'a CharsSlices<'a, Offset, Length>
+    for &'a CharsCows<'a, Offset, Length>
 {
     type Item = &'a str;
-    type IntoIter = CharsSlicesIter<'a, Offset, Length>;
+    type IntoIter = CharsCowsIter<'a, Offset, Length>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
@@ -2189,23 +2252,23 @@ impl<'a, Offset: OffsetType, Length: LengthType> IntoIterator
 }
 
 impl<'a, Offset: OffsetType, Length: LengthType> IntoIterator
-    for &'a BytesSlices<'a, Offset, Length>
+    for &'a BytesCows<'a, Offset, Length>
 {
     type Item = &'a [u8];
-    type IntoIter = BytesSlicesIter<'a, Offset, Length>;
+    type IntoIter = BytesCowsIter<'a, Offset, Length>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
 
-// Conversion implementations between BytesSlices and CharsSlices
-impl<'a, Offset: OffsetType, Length: LengthType> TryFrom<BytesSlices<'a, Offset, Length>>
-    for CharsSlices<'a, Offset, Length>
+// Conversion implementations between BytesCows and CharsCows
+impl<'a, Offset: OffsetType, Length: LengthType> TryFrom<BytesCows<'a, Offset, Length>>
+    for CharsCows<'a, Offset, Length>
 {
     type Error = StringTapeError;
 
-    fn try_from(bytes_slices: BytesSlices<'a, Offset, Length>) -> Result<Self, Self::Error> {
+    fn try_from(bytes_slices: BytesCows<'a, Offset, Length>) -> Result<Self, Self::Error> {
         // Validate that all slices contain valid UTF-8
         for i in 0..bytes_slices.len() {
             let slice = bytes_slices
@@ -2215,84 +2278,84 @@ impl<'a, Offset: OffsetType, Length: LengthType> TryFrom<BytesSlices<'a, Offset,
         }
 
         // Safety: All slices validated as UTF-8
-        Ok(CharsSlices {
+        Ok(CharsCows {
             data: bytes_slices.data,
             entries: bytes_slices.entries,
         })
     }
 }
 
-impl<'a, Offset: OffsetType, Length: LengthType> From<CharsSlices<'a, Offset, Length>>
-    for BytesSlices<'a, Offset, Length>
+impl<'a, Offset: OffsetType, Length: LengthType> From<CharsCows<'a, Offset, Length>>
+    for BytesCows<'a, Offset, Length>
 {
-    fn from(chars_slices: CharsSlices<'a, Offset, Length>) -> Self {
-        // CharsSlices contains valid UTF-8, so conversion to BytesSlices is infallible
-        BytesSlices {
+    fn from(chars_slices: CharsCows<'a, Offset, Length>) -> Self {
+        // CharsCows contains valid UTF-8, so conversion to BytesCows is infallible
+        BytesCows {
             data: chars_slices.data,
             entries: chars_slices.entries,
         }
     }
 }
 
-impl<'a, Offset: OffsetType, Length: LengthType> BytesSlices<'a, Offset, Length> {
-    pub fn try_into_chars_slices(self) -> Result<CharsSlices<'a, Offset, Length>, StringTapeError> {
+impl<'a, Offset: OffsetType, Length: LengthType> BytesCows<'a, Offset, Length> {
+    pub fn try_into_chars_slices(self) -> Result<CharsCows<'a, Offset, Length>, StringTapeError> {
         self.try_into()
     }
 }
 
-impl<'a, Offset: OffsetType, Length: LengthType> CharsSlices<'a, Offset, Length> {
-    pub fn into_bytes_slices(self) -> BytesSlices<'a, Offset, Length> {
+impl<'a, Offset: OffsetType, Length: LengthType> CharsCows<'a, Offset, Length> {
+    pub fn into_bytes_slices(self) -> BytesCows<'a, Offset, Length> {
         self.into()
     }
 }
 
 // Type aliases for common configurations
-pub type CharsSlicesU32U16<'a> = CharsSlices<'a, u32, u16>;
-pub type CharsSlicesU32U8<'a> = CharsSlices<'a, u32, u8>;
-pub type CharsSlicesU16U8<'a> = CharsSlices<'a, u16, u8>;
-pub type CharsSlicesU64U32<'a> = CharsSlices<'a, u64, u32>;
+pub type CharsCowsU32U16<'a> = CharsCows<'a, u32, u16>;
+pub type CharsCowsU32U8<'a> = CharsCows<'a, u32, u8>;
+pub type CharsCowsU16U8<'a> = CharsCows<'a, u16, u8>;
+pub type CharsCowsU64U32<'a> = CharsCows<'a, u64, u32>;
 
-pub type BytesSlicesU32U16<'a> = BytesSlices<'a, u32, u16>;
-pub type BytesSlicesU32U8<'a> = BytesSlices<'a, u32, u8>;
-pub type BytesSlicesU16U8<'a> = BytesSlices<'a, u16, u8>;
-pub type BytesSlicesU64U32<'a> = BytesSlices<'a, u64, u32>;
+pub type BytesCowsU32U16<'a> = BytesCows<'a, u32, u16>;
+pub type BytesCowsU32U8<'a> = BytesCows<'a, u32, u8>;
+pub type BytesCowsU16U8<'a> = BytesCows<'a, u16, u8>;
+pub type BytesCowsU64U32<'a> = BytesCows<'a, u64, u32>;
 
 // ========================
-// Auto-selecting CharsSlices
+// Auto-selecting CharsCows
 // ========================
 
-/// Automatically selects the most memory-efficient CharsSlices type based on data size.
+/// Automatically selects the most memory-efficient CharsCows type based on data size.
 ///
 /// Returns an enum that can hold any combination of offset/length types.
-pub enum CharsSlicesAuto<'a> {
-    U32U8(CharsSlices<'a, u32, u8>),
-    U32U16(CharsSlices<'a, u32, u16>),
-    U32U32(CharsSlices<'a, u32, u32>),
-    U64U8(CharsSlices<'a, u64, u8>),
-    U64U16(CharsSlices<'a, u64, u16>),
-    U64U32(CharsSlices<'a, u64, u32>),
+pub enum CharsCowsAuto<'a> {
+    U32U8(CharsCows<'a, u32, u8>),
+    U32U16(CharsCows<'a, u32, u16>),
+    U32U32(CharsCows<'a, u32, u32>),
+    U64U8(CharsCows<'a, u64, u8>),
+    U64U16(CharsCows<'a, u64, u16>),
+    U64U32(CharsCows<'a, u64, u32>),
 }
 
-impl<'a> CharsSlicesAuto<'a> {
-    /// Creates the most memory-efficient CharsSlices based on data size and max word length.
+impl<'a> CharsCowsAuto<'a> {
+    /// Creates the most memory-efficient CharsCows based on data size and max word length.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::CharsSlicesAuto;
+    /// use stringtape::CharsCowsAuto;
     /// use std::borrow::Cow;
     ///
     /// let data = "hello world";
-    /// let slices = CharsSlicesAuto::from_iter_and_data(
+    /// let cows = CharsCowsAuto::from_iter_and_data(
     ///     data.split_whitespace(),
     ///     Cow::Borrowed(data.as_bytes())
     /// ).unwrap();
     ///
-    /// // Automatically picks CharsSlices<u32, u8> for small data
-    /// assert_eq!(slices.len(), 2);
+    /// // Automatically picks CharsCows<u32, u8> for small data
+    /// assert_eq!(cows.len(), 2);
     /// # Ok::<(), stringtape::StringTapeError>(())
     /// ```
-    /// Creates the most memory-efficient CharsSlices using a two-pass strategy.
+    /// Creates the most memory-efficient CharsCows using a two-pass strategy.
     ///
     /// First pass scans to find the maximum word length, then second pass builds
     /// with optimal types. Requires `Clone` iterator for memory efficiency.
@@ -2300,16 +2363,16 @@ impl<'a> CharsSlicesAuto<'a> {
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::CharsSlicesAuto;
+    /// use stringtape::CharsCowsAuto;
     /// use std::borrow::Cow;
     ///
     /// let data = "hello world";
-    /// let slices = CharsSlicesAuto::from_iter_and_data(
+    /// let cows = CharsCowsAuto::from_iter_and_data(
     ///     data.split_whitespace(),  // Clone iterator
     ///     Cow::Borrowed(data.as_bytes())
     /// ).unwrap();
     ///
-    /// assert_eq!(slices.len(), 2);
+    /// assert_eq!(cows.len(), 2);
     /// # Ok::<(), stringtape::StringTapeError>(())
     /// ```
     pub fn from_iter_and_data<I>(iter: I, data: Cow<'a, [u8]>) -> Result<Self, StringTapeError>
@@ -2333,24 +2396,24 @@ impl<'a> CharsSlicesAuto<'a> {
         // Second pass: build with optimal types
         if max_word_len <= u8::MAX as usize {
             if needs_u64_offset {
-                Ok(Self::U64U8(CharsSlices::from_iter_and_data(iter, data)?))
+                Ok(Self::U64U8(CharsCows::from_iter_and_data(iter, data)?))
             } else {
-                Ok(Self::U32U8(CharsSlices::from_iter_and_data(iter, data)?))
+                Ok(Self::U32U8(CharsCows::from_iter_and_data(iter, data)?))
             }
         } else if max_word_len <= u16::MAX as usize {
             if needs_u64_offset {
-                Ok(Self::U64U16(CharsSlices::from_iter_and_data(iter, data)?))
+                Ok(Self::U64U16(CharsCows::from_iter_and_data(iter, data)?))
             } else {
-                Ok(Self::U32U16(CharsSlices::from_iter_and_data(iter, data)?))
+                Ok(Self::U32U16(CharsCows::from_iter_and_data(iter, data)?))
             }
         } else if needs_u64_offset {
-            Ok(Self::U64U32(CharsSlices::from_iter_and_data(iter, data)?))
+            Ok(Self::U64U32(CharsCows::from_iter_and_data(iter, data)?))
         } else {
-            Ok(Self::U32U32(CharsSlices::from_iter_and_data(iter, data)?))
+            Ok(Self::U32U32(CharsCows::from_iter_and_data(iter, data)?))
         }
     }
 
-    /// Returns the number of slices.
+    /// Returns the number of cows.
     pub fn len(&self) -> usize {
         match self {
             Self::U32U8(s) => s.len(),
@@ -2362,7 +2425,7 @@ impl<'a> CharsSlicesAuto<'a> {
         }
     }
 
-    /// Returns `true` if the collection contains no slices.
+    /// Returns `true` if the collection contains no cows.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -2394,35 +2457,35 @@ impl<'a> CharsSlicesAuto<'a> {
     /// Returns a string describing the selected type combination.
     pub fn type_name(&self) -> &'static str {
         match self {
-            Self::U32U8(_) => "CharsSlices<u32, u8>",
-            Self::U32U16(_) => "CharsSlices<u32, u16>",
-            Self::U32U32(_) => "CharsSlices<u32, u32>",
-            Self::U64U8(_) => "CharsSlices<u64, u8>",
-            Self::U64U16(_) => "CharsSlices<u64, u16>",
-            Self::U64U32(_) => "CharsSlices<u64, u32>",
+            Self::U32U8(_) => "CharsCows<u32, u8>",
+            Self::U32U16(_) => "CharsCows<u32, u16>",
+            Self::U32U32(_) => "CharsCows<u32, u32>",
+            Self::U64U8(_) => "CharsCows<u64, u8>",
+            Self::U64U16(_) => "CharsCows<u64, u16>",
+            Self::U64U32(_) => "CharsCows<u64, u32>",
         }
     }
 
-    /// Returns an iterator over the string slices.
+    /// Returns an iterator over the string cows.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::CharsSlicesAuto;
+    /// use stringtape::CharsCowsAuto;
     /// use std::borrow::Cow;
     ///
     /// let data = "hello world foo";
-    /// let slices = CharsSlicesAuto::from_iter_and_data(
+    /// let cows = CharsCowsAuto::from_iter_and_data(
     ///     data.split_whitespace(),
     ///     Cow::Borrowed(data.as_bytes())
     /// ).unwrap();
     ///
-    /// let words: Vec<&str> = slices.iter().collect();
+    /// let words: Vec<&str> = cows.iter().collect();
     /// assert_eq!(words, vec!["hello", "world", "foo"]);
     /// # Ok::<(), stringtape::StringTapeError>(())
     /// ```
-    pub fn iter(&self) -> CharsSlicesAutoIter<'_> {
-        CharsSlicesAutoIter {
+    pub fn iter(&self) -> CharsCowsAutoIter<'_> {
+        CharsCowsAutoIter {
             inner: self,
             index: 0,
         }
@@ -2435,17 +2498,17 @@ impl<'a> CharsSlicesAuto<'a> {
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::CharsSlicesAuto;
+    /// use stringtape::CharsCowsAuto;
     /// use std::borrow::Cow;
     ///
     /// let data = "zebra apple banana";
-    /// let mut slices = CharsSlicesAuto::from_iter_and_data(
+    /// let mut cows = CharsCowsAuto::from_iter_and_data(
     ///     data.split_whitespace(),
     ///     Cow::Borrowed(data.as_bytes())
     /// ).unwrap();
     ///
-    /// slices.sort();
-    /// let sorted: Vec<&str> = slices.iter().collect();
+    /// cows.sort();
+    /// let sorted: Vec<&str> = cows.iter().collect();
     /// assert_eq!(sorted, vec!["apple", "banana", "zebra"]);
     /// # Ok::<(), stringtape::StringTapeError>(())
     /// ```
@@ -2479,18 +2542,18 @@ impl<'a> CharsSlicesAuto<'a> {
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::CharsSlicesAuto;
+    /// use stringtape::CharsCowsAuto;
     /// use std::borrow::Cow;
     ///
     /// let data = "aaa bb c";
-    /// let mut slices = CharsSlicesAuto::from_iter_and_data(
+    /// let mut cows = CharsCowsAuto::from_iter_and_data(
     ///     data.split_whitespace(),
     ///     Cow::Borrowed(data.as_bytes())
     /// ).unwrap();
     ///
     /// // Sort by length, then alphabetically
-    /// slices.sort_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)));
-    /// let sorted: Vec<&str> = slices.iter().collect();
+    /// cows.sort_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)));
+    /// let sorted: Vec<&str> = cows.iter().collect();
     /// assert_eq!(sorted, vec!["c", "bb", "aaa"]);
     /// # Ok::<(), stringtape::StringTapeError>(())
     /// ```
@@ -2513,18 +2576,18 @@ impl<'a> CharsSlicesAuto<'a> {
     /// # Examples
     ///
     /// ```rust
-    /// use stringtape::CharsSlicesAuto;
+    /// use stringtape::CharsCowsAuto;
     /// use std::borrow::Cow;
     ///
     /// let data = "aaa bb c";
-    /// let mut slices = CharsSlicesAuto::from_iter_and_data(
+    /// let mut cows = CharsCowsAuto::from_iter_and_data(
     ///     data.split_whitespace(),
     ///     Cow::Borrowed(data.as_bytes())
     /// ).unwrap();
     ///
     /// // Sort by string length
-    /// slices.sort_by_key(|s| s.len());
-    /// let sorted: Vec<&str> = slices.iter().collect();
+    /// cows.sort_by_key(|s| s.len());
+    /// let sorted: Vec<&str> = cows.iter().collect();
     /// assert_eq!(sorted, vec!["c", "bb", "aaa"]);
     /// # Ok::<(), stringtape::StringTapeError>(())
     /// ```
@@ -2544,13 +2607,13 @@ impl<'a> CharsSlicesAuto<'a> {
     }
 }
 
-/// Iterator over CharsSlicesAuto string slices.
-pub struct CharsSlicesAutoIter<'a> {
-    inner: &'a CharsSlicesAuto<'a>,
+/// Iterator over CharsCowsAuto string cows.
+pub struct CharsCowsAutoIter<'a> {
+    inner: &'a CharsCowsAuto<'a>,
     index: usize,
 }
 
-impl<'a> Iterator for CharsSlicesAutoIter<'a> {
+impl<'a> Iterator for CharsCowsAutoIter<'a> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -2567,11 +2630,11 @@ impl<'a> Iterator for CharsSlicesAutoIter<'a> {
     }
 }
 
-impl<'a> ExactSizeIterator for CharsSlicesAutoIter<'a> {}
+impl<'a> ExactSizeIterator for CharsCowsAutoIter<'a> {}
 
-impl<'a> IntoIterator for &'a CharsSlicesAuto<'a> {
+impl<'a> IntoIterator for &'a CharsCowsAuto<'a> {
     type Item = &'a str;
-    type IntoIter = CharsSlicesAutoIter<'a>;
+    type IntoIter = CharsCowsAutoIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
@@ -2579,49 +2642,56 @@ impl<'a> IntoIterator for &'a CharsSlicesAuto<'a> {
 }
 
 // ========================
-// Auto-selecting BytesSlices
+// Auto-selecting BytesCows
 // ========================
 
-/// Automatically selects the most memory-efficient BytesSlices type based on data size.
-pub enum BytesSlicesAuto<'a> {
-    U32U8(BytesSlices<'a, u32, u8>),
-    U32U16(BytesSlices<'a, u32, u16>),
-    U32U32(BytesSlices<'a, u32, u32>),
-    U64U8(BytesSlices<'a, u64, u8>),
-    U64U16(BytesSlices<'a, u64, u16>),
-    U64U32(BytesSlices<'a, u64, u32>),
+/// Automatically selects the most memory-efficient BytesCows type based on data size.
+pub enum BytesCowsAuto<'a> {
+    U32U8(BytesCows<'a, u32, u8>),
+    U32U16(BytesCows<'a, u32, u16>),
+    U32U32(BytesCows<'a, u32, u32>),
+    U64U8(BytesCows<'a, u64, u8>),
+    U64U16(BytesCows<'a, u64, u16>),
+    U64U32(BytesCows<'a, u64, u32>),
 }
 
-impl<'a> BytesSlicesAuto<'a> {
-    /// Creates BytesSlicesAuto from iterator of (offset, length) pairs.
+impl<'a> BytesCowsAuto<'a> {
+    /// Creates BytesCowsAuto from iterator of byte cows.
+    /// Auto-selects offset and length types based on data size and max slice length.
     pub fn from_iter_and_data<I>(iter: I, data: Cow<'a, [u8]>) -> Result<Self, StringTapeError>
     where
-        I: IntoIterator<Item = (usize, usize)> + Clone,
+        I: IntoIterator + Clone,
+        I::Item: AsRef<[u8]>,
     {
         let data_len = data.len();
 
-        // First pass: find max length
-        let max_len = iter.clone().into_iter().map(|(_, l)| l).max().unwrap_or(0);
+        // First pass: find max slice length
+        let max_len = iter
+            .clone()
+            .into_iter()
+            .map(|b| b.as_ref().len())
+            .max()
+            .unwrap_or(0);
 
         let needs_u64_offset = data_len > u32::MAX as usize;
 
         // Second pass: build with optimal types
         if max_len <= u8::MAX as usize {
             if needs_u64_offset {
-                Ok(Self::U64U8(BytesSlices::from_iter_and_data(iter, data)?))
+                Ok(Self::U64U8(BytesCows::from_iter_and_data(iter, data)?))
             } else {
-                Ok(Self::U32U8(BytesSlices::from_iter_and_data(iter, data)?))
+                Ok(Self::U32U8(BytesCows::from_iter_and_data(iter, data)?))
             }
         } else if max_len <= u16::MAX as usize {
             if needs_u64_offset {
-                Ok(Self::U64U16(BytesSlices::from_iter_and_data(iter, data)?))
+                Ok(Self::U64U16(BytesCows::from_iter_and_data(iter, data)?))
             } else {
-                Ok(Self::U32U16(BytesSlices::from_iter_and_data(iter, data)?))
+                Ok(Self::U32U16(BytesCows::from_iter_and_data(iter, data)?))
             }
         } else if needs_u64_offset {
-            Ok(Self::U64U32(BytesSlices::from_iter_and_data(iter, data)?))
+            Ok(Self::U64U32(BytesCows::from_iter_and_data(iter, data)?))
         } else {
-            Ok(Self::U32U32(BytesSlices::from_iter_and_data(iter, data)?))
+            Ok(Self::U32U32(BytesCows::from_iter_and_data(iter, data)?))
         }
     }
 
@@ -3575,50 +3645,50 @@ mod tests {
     #[test]
     fn chars_slices_basic() {
         let data = "hello world foo bar";
-        let slices = CharsSlicesU32U16::from_iter_and_data(
+        let cows = CharsCowsU32U16::from_iter_and_data(
             data.split_whitespace(),
             Cow::Borrowed(data.as_bytes()),
         )
         .unwrap();
 
-        assert_eq!(slices.len(), 4);
-        assert_eq!(slices.get(0), Some("hello"));
-        assert_eq!(slices.get(1), Some("world"));
-        assert_eq!(slices.get(2), Some("foo"));
-        assert_eq!(slices.get(3), Some("bar"));
-        assert_eq!(slices.get(4), None);
+        assert_eq!(cows.len(), 4);
+        assert_eq!(cows.get(0), Some("hello"));
+        assert_eq!(cows.get(1), Some("world"));
+        assert_eq!(cows.get(2), Some("foo"));
+        assert_eq!(cows.get(3), Some("bar"));
+        assert_eq!(cows.get(4), None);
     }
 
     #[test]
     fn chars_slices_index() {
         let data = "abc def";
 
-        let slices = CharsSlicesU64U32::from_iter_and_data(
+        let cows = CharsCowsU64U32::from_iter_and_data(
             data.split_whitespace(),
             Cow::Borrowed(data.as_bytes()),
         )
         .unwrap();
 
-        assert_eq!(&slices[0], "abc");
-        assert_eq!(&slices[1], "def");
+        assert_eq!(&cows[0], "abc");
+        assert_eq!(&cows[1], "def");
     }
 
     #[test]
     fn chars_slices_iterator() {
         let data = "a b c";
 
-        let slices = CharsSlicesU64U32::from_iter_and_data(
+        let cows = CharsCowsU64U32::from_iter_and_data(
             data.split_whitespace(),
             Cow::Borrowed(data.as_bytes()),
         )
         .unwrap();
 
-        let result: Vec<&str> = slices.iter().collect();
+        let result: Vec<&str> = cows.iter().collect();
         assert_eq!(result, vec!["a", "b", "c"]);
 
         // Test for-loop
         let mut count = 0;
-        for s in &slices {
+        for s in &cows {
             assert_eq!(s.len(), 1);
             count += 1;
         }
@@ -3634,14 +3704,14 @@ mod tests {
         let s3 = &data[9..10]; // "9"
         let s4 = &data[2..5]; // "234"
 
-        let slices =
-            CharsSlicesU64U32::from_iter_and_data([s1, s2, s3, s4], Cow::Borrowed(data.as_bytes()))
+        let cows =
+            CharsCowsU64U32::from_iter_and_data([s1, s2, s3, s4], Cow::Borrowed(data.as_bytes()))
                 .unwrap();
 
-        assert_eq!(slices.get(0), Some("56"));
-        assert_eq!(slices.get(1), Some("0"));
-        assert_eq!(slices.get(2), Some("9"));
-        assert_eq!(slices.get(3), Some("234"));
+        assert_eq!(cows.get(0), Some("56"));
+        assert_eq!(cows.get(1), Some("0"));
+        assert_eq!(cows.get(2), Some("9"));
+        assert_eq!(cows.get(3), Some("234"));
     }
 
     #[test]
@@ -3651,14 +3721,14 @@ mod tests {
         let s2 = &data[1..2]; // "b"
         let s3 = &data[2..2]; // empty
 
-        let slices =
-            CharsSlicesU64U32::from_iter_and_data([s1, s2, s3], Cow::Borrowed(data.as_bytes()))
+        let cows =
+            CharsCowsU64U32::from_iter_and_data([s1, s2, s3], Cow::Borrowed(data.as_bytes()))
                 .unwrap();
 
-        assert_eq!(slices.len(), 3);
-        assert_eq!(slices.get(0), Some(""));
-        assert_eq!(slices.get(1), Some("b"));
-        assert_eq!(slices.get(2), Some(""));
+        assert_eq!(cows.len(), 3);
+        assert_eq!(cows.get(0), Some(""));
+        assert_eq!(cows.get(1), Some("b"));
+        assert_eq!(cows.get(2), Some(""));
     }
 
     #[test]
@@ -3668,7 +3738,7 @@ mod tests {
 
         // u8 length overflow - 256 bytes exceeds u8::MAX
         let long_slice = &data[0..256];
-        let result = CharsSlicesU32U8::from_iter_and_data(
+        let result = CharsCowsU32U8::from_iter_and_data(
             core::iter::once(long_slice),
             Cow::Borrowed(data.as_bytes()),
         );
@@ -3676,7 +3746,7 @@ mod tests {
         assert_eq!(result.unwrap_err(), StringTapeError::OffsetOverflow);
 
         // Valid with u16 length
-        let result = CharsSlicesU32U16::from_iter_and_data(
+        let result = CharsCowsU32U16::from_iter_and_data(
             core::iter::once(long_slice),
             Cow::Borrowed(data.as_bytes()),
         );
@@ -3689,7 +3759,7 @@ mod tests {
         let other_data = String::from("world");
 
         // Slice from different string - should fail
-        let result = CharsSlicesU64U32::from_iter_and_data(
+        let result = CharsCowsU64U32::from_iter_and_data(
             core::iter::once(other_data.as_str()),
             Cow::Borrowed(data.as_bytes()),
         );
@@ -3697,7 +3767,7 @@ mod tests {
         assert_eq!(result.unwrap_err(), StringTapeError::IndexOutOfBounds);
 
         // Valid slice from same string
-        let result = CharsSlicesU64U32::from_iter_and_data(
+        let result = CharsCowsU64U32::from_iter_and_data(
             core::iter::once(data.as_str()),
             Cow::Borrowed(data.as_bytes()),
         );
@@ -3707,19 +3777,19 @@ mod tests {
     #[test]
     fn slices_conversions() {
         let data = "hello world";
-        let chars = CharsSlicesU32U8::from_iter_and_data(
+        let chars = CharsCowsU32U8::from_iter_and_data(
             data.split_whitespace(),
             Cow::Borrowed(data.as_bytes()),
         )
         .unwrap();
 
-        // CharsSlices -> BytesSlices
-        let bytes: BytesSlicesU32U8 = chars.into();
+        // CharsCows -> BytesCows
+        let bytes: BytesCowsU32U8 = chars.into();
         assert_eq!(bytes.get(0), Some(b"hello" as &[u8]));
         assert_eq!(bytes.get(1), Some(b"world" as &[u8]));
 
-        // N -> CharsSlices
-        let chars_back: CharsSlicesU32U8 = bytes.try_into().unwrap();
+        // N -> CharsCows
+        let chars_back: CharsCowsU32U8 = bytes.try_into().unwrap();
         assert_eq!(chars_back.get(0), Some("hello"));
         assert_eq!(chars_back.get(1), Some("world"));
     }
@@ -3728,47 +3798,47 @@ mod tests {
     fn slices_type_aliases() {
         let data = "test";
 
-        let _s1: CharsSlicesU32U16 =
-            CharsSlices::from_iter_and_data(core::iter::once(data), Cow::Borrowed(data.as_bytes()))
+        let _s1: CharsCowsU32U16 =
+            CharsCows::from_iter_and_data(core::iter::once(data), Cow::Borrowed(data.as_bytes()))
                 .unwrap();
-        let _s2: CharsSlicesU32U8 =
-            CharsSlices::from_iter_and_data(core::iter::once(data), Cow::Borrowed(data.as_bytes()))
+        let _s2: CharsCowsU32U8 =
+            CharsCows::from_iter_and_data(core::iter::once(data), Cow::Borrowed(data.as_bytes()))
                 .unwrap();
-        let _s3: CharsSlicesU16U8 =
-            CharsSlices::from_iter_and_data(core::iter::once(data), Cow::Borrowed(data.as_bytes()))
+        let _s3: CharsCowsU16U8 =
+            CharsCows::from_iter_and_data(core::iter::once(data), Cow::Borrowed(data.as_bytes()))
                 .unwrap();
-        let _s4: CharsSlicesU64U32 =
-            CharsSlices::from_iter_and_data(core::iter::once(data), Cow::Borrowed(data.as_bytes()))
+        let _s4: CharsCowsU64U32 =
+            CharsCows::from_iter_and_data(core::iter::once(data), Cow::Borrowed(data.as_bytes()))
                 .unwrap();
     }
 
     #[test]
     fn chars_slices_auto_sorted() {
         let data = "zebra apple banana cherry";
-        let mut slices = CharsSlicesAuto::from_iter_and_data(
+        let mut cows = CharsCowsAuto::from_iter_and_data(
             data.split_whitespace(),
             Cow::Borrowed(data.as_bytes()),
         )
         .unwrap();
 
         // Sort in-place using standard Rust patterns
-        slices.sort();
+        cows.sort();
 
-        let sorted: Vec<&str> = slices.iter().collect();
+        let sorted: Vec<&str> = cows.iter().collect();
         assert_eq!(sorted, vec!["apple", "banana", "cherry", "zebra"]);
     }
 
     #[test]
     fn chars_slices_auto_to_vec_string() {
         let data = "hello world foo";
-        let slices = CharsSlicesAuto::from_iter_and_data(
+        let cows = CharsCowsAuto::from_iter_and_data(
             data.split_whitespace(),
             Cow::Borrowed(data.as_bytes()),
         )
         .unwrap();
 
         // Convert to Vec<String> using iterator
-        let vec_string: Vec<String> = slices.iter().map(|s| s.to_string()).collect();
+        let vec_string: Vec<String> = cows.iter().map(|s| s.to_string()).collect();
 
         assert_eq!(vec_string, vec!["hello", "world", "foo"]);
     }
@@ -3776,14 +3846,14 @@ mod tests {
     #[test]
     fn chars_slices_auto_filter_map() {
         let data = "hello world foo bar";
-        let slices = CharsSlicesAuto::from_iter_and_data(
+        let cows = CharsCowsAuto::from_iter_and_data(
             data.split_whitespace(),
             Cow::Borrowed(data.as_bytes()),
         )
         .unwrap();
 
         // Filter and uppercase using iterator - common Vec<String> pattern
-        let result: Vec<String> = slices
+        let result: Vec<String> = cows
             .iter()
             .filter_map(|word| {
                 if word.len() > 3 {
@@ -3801,22 +3871,22 @@ mod tests {
     fn chars_slices_auto_type_selection() {
         // Small data -> u32 offset, u8 length
         let small = "hi";
-        let s1 = CharsSlicesAuto::from_iter_and_data(
+        let s1 = CharsCowsAuto::from_iter_and_data(
             core::iter::once(small),
             Cow::Borrowed(small.as_bytes()),
         )
         .unwrap();
-        assert!(matches!(s1, CharsSlicesAuto::U32U8(_)));
+        assert!(matches!(s1, CharsCowsAuto::U32U8(_)));
         assert_eq!(s1.bytes_per_entry(), 5);
 
         // Long word -> u32 offset, u16 length
         let long_word = "a".repeat(300);
-        let s2 = CharsSlicesAuto::from_iter_and_data(
+        let s2 = CharsCowsAuto::from_iter_and_data(
             core::iter::once(long_word.as_str()),
             Cow::Borrowed(long_word.as_bytes()),
         )
         .unwrap();
-        assert!(matches!(s2, CharsSlicesAuto::U32U16(_)));
+        assert!(matches!(s2, CharsCowsAuto::U32U16(_)));
         assert_eq!(s2.bytes_per_entry(), 6);
     }
 }
@@ -3870,18 +3940,18 @@ pub mod examples {
             .nth(1)
             .expect("Usage: bench_chars_slices <file>");
 
-        eprintln!("[CharsSlices] Loading file: {}", path);
+        eprintln!("[CharsCows] Loading file: {}", path);
         let content = fs::read_to_string(&path)?;
-        eprintln!("[CharsSlices] File size: {} bytes", content.len());
+        eprintln!("[CharsCows] File size: {} bytes", content.len());
 
-        eprintln!("[CharsSlices] Building CharsSlices from words...");
+        eprintln!("[CharsCows] Building CharsCows from words...");
         // Use u64 offset for files >4GB, u32 length for words up to 4GB
-        let slices = CharsSlicesAuto::from_iter_and_data(
+        let cows = CharsCowsAuto::from_iter_and_data(
             content.split_whitespace(),
             Cow::Borrowed(content.as_bytes()),
         )?;
 
-        eprintln!("[CharsSlices] Collected {} words", slices.len());
+        eprintln!("[CharsCows] Collected {} words", cows.len());
 
         // Keep alive to measure peak
         std::thread::sleep(std::time::Duration::from_millis(1000));
