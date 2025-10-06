@@ -85,16 +85,13 @@ use allocator_api2::alloc::{Allocator, Global, Layout};
 /// Errors that can occur when working with tape classes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StringTapeError {
-    /// The string data size exceeds the maximum value representable by the offset type.
-    ///
-    /// This can happen when using 32-bit offsets (`CharsTapeI32`) and the total data
-    /// exceeds 2GB, or when memory allocation fails.
+    /// Data size exceeds offset type maximum (e.g., >2GB for 32-bit offsets).
     OffsetOverflow,
     /// Memory allocation failed.
     AllocationError,
-    /// Index is out of bounds for the current number of strings.
+    /// Index out of bounds.
     IndexOutOfBounds,
-    /// Invalid UTF-8 sequence encountered.
+    /// Invalid UTF-8 sequence.
     Utf8Error(core::str::Utf8Error),
 }
 
@@ -120,41 +117,24 @@ impl std::error::Error for StringTapeError {}
 ///
 /// # Type Parameters
 ///
-/// * `Offset` - The offset type used for indexing (`i32` for CharsTapeI32, `i64` for CharsTapeI64)
-/// * `A` - The allocator type (must implement `Allocator`). Defaults to `Global`.
+/// * `Offset` - Offset type (`i32`, `i64`, `u32`, `u64`)
+/// * `A` - Allocator type (defaults to `Global`)
 ///
-/// # Examples
+/// # Example
 ///
 /// ```rust
 /// use stringtape::{CharsTapeI32, StringTapeError};
 ///
-/// // Create a new CharsTape with i32 offsets and global allocator
 /// let mut tape = CharsTapeI32::new();
 /// tape.push("hello")?;
-/// tape.push("world")?;
-///
-/// assert_eq!(tape.len(), 2);
 /// assert_eq!(&tape[0], "hello");
-/// assert_eq!(tape.get(1), Some("world"));
 /// # Ok::<(), StringTapeError>(())
 /// ```
 ///
-/// # Custom Allocators
-///
-/// ```rust,ignore
-/// use stringtape::CharsTape;
-/// use allocator_api2::alloc::{Allocator, Global};
-///
-/// // Use with the global allocator explicitly
-/// let tape: CharsTape<i32, Global> = CharsTape::new_in(Global);
-/// ```
-///
-/// # Memory Layout
-///
-/// The memory layout is compatible with Apache Arrow:
+/// Memory layout compatible with Apache Arrow:
 /// ```text
-/// Data buffer:    [h,e,l,l,o,w,o,r,l,d]
-/// Offset buffer:  [0, 5, 10]
+/// Data:    [h,e,l,l,o,w,o,r,l,d]
+/// Offsets: [0, 5, 10]
 /// ```
 struct RawTape<Offset: OffsetType, A: Allocator> {
     data: Option<NonNull<[u8]>>,
@@ -188,10 +168,7 @@ pub struct BytesTape<Offset: OffsetType = i32, A: Allocator = Global> {
     inner: RawTape<Offset, A>,
 }
 
-/// A view into a continuous slice of a RawTape.
-///
-/// This provides a zero-copy view that implements the same read-only interface
-/// as RawTape but cannot modify the underlying data.
+/// Zero-copy read-only view into a RawTape slice.
 pub struct RawTapeView<'a, Offset: OffsetType> {
     data: &'a [u8],
     offsets: &'a [Offset],
@@ -209,10 +186,7 @@ pub struct BytesTapeView<'a, Offset: OffsetType = i32> {
 
 /// Trait for offset types used in CharsTape.
 ///
-/// This trait defines the interface for offset types that can be used to index
-/// into the string data buffer. Implementations are provided for `i32` and `i64`
-/// to match Apache Arrow's String and LargeString array types, and for `u32` and
-/// `u64` when unsigned offsets are desired (note: Arrow interop is i32/i64-only).
+/// Implementations: `i32`/`i64` (Arrow-compatible), `u32`/`u64` (unsigned, no Arrow interop).
 pub trait OffsetType: Copy + Default + PartialOrd + Sub<Output = Self> {
     /// Size of the offset type in bytes.
     const SIZE: usize;
@@ -418,15 +392,12 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
         }
     }
 
-    /// Creates a new CharsTape with pre-allocated capacity using the global allocator.
-    ///
-    /// Pre-allocating capacity can improve performance when you know approximately
-    /// how much data you'll be storing.
+    /// Creates a tape with pre-allocated capacity.
     ///
     /// # Arguments
     ///
-    /// * `data_capacity` - Number of bytes to pre-allocate for string data
-    /// * `strings_capacity` - Number of string slots to pre-allocate
+    /// * `data_capacity` - Bytes for string data
+    /// * `strings_capacity` - Number of string slots
     ///
     /// # Examples
     ///
@@ -555,24 +526,20 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
         Ok(())
     }
 
-    /// Adds a raw bytes slice to the end of the tape.
+    /// Appends bytes to the tape.
     ///
     /// # Errors
     ///
-    /// Returns `StringTapeError::OffsetOverflow` if adding this slice would cause
-    /// the total data size to exceed the maximum value representable by the offset type.
+    /// - `OffsetOverflow` if data size exceeds offset type maximum
+    /// - `AllocationError` if memory allocation fails
     ///
-    /// Returns `StringTapeError::AllocationError` if memory allocation fails.
-    ///
-    /// # Examples
+    /// # Example
     ///
     /// ```rust
-    /// use stringtape::{BytesTapeI32, StringTapeError};
-    ///
+    /// # use stringtape::{BytesTapeI32, StringTapeError};
     /// let mut tape = BytesTapeI32::new();
     /// tape.push(b"hello")?;
-    /// tape.push(&[1, 2, 3])?;
-    /// assert_eq!(tape.len(), 2);
+    /// assert_eq!(tape.len(), 1);
     /// # Ok::<(), StringTapeError>(())
     /// ```
     pub fn push(&mut self, bytes: &[u8]) -> Result<(), StringTapeError> {
@@ -694,9 +661,7 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
         }
     }
 
-    /// Shortens the tape, keeping the first `len` items and dropping the rest.
-    ///
-    /// If `len` is greater than the current length, this has no effect.
+    /// Keeps the first `len` items, drops the rest.
     pub fn truncate(&mut self, len: usize) {
         if len >= self.len_items {
             return;
@@ -712,16 +677,14 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
         };
     }
 
-    /// Extends the tape with the contents of an iterator of byte slices.
+    /// Appends all items from an iterator.
     ///
-    /// # Examples
+    /// # Example
     ///
     /// ```rust
-    /// use stringtape::{BytesTapeI32, StringTapeError};
-    ///
+    /// # use stringtape::{BytesTapeI32, StringTapeError};
     /// let mut tape = BytesTapeI32::new();
     /// tape.extend([b"hello".as_slice(), b"world".as_slice()])?;
-    /// assert_eq!(tape.len(), 2);
     /// # Ok::<(), StringTapeError>(())
     /// ```
     pub fn extend<I>(&mut self, iter: I) -> Result<(), StringTapeError>
@@ -735,17 +698,13 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
         Ok(())
     }
 
-    /// Returns the raw parts of the tape for Apache Arrow compatibility.
+    /// Returns raw pointers for Apache Arrow compatibility.
     ///
-    /// Returns named fields:
-    /// - `data_ptr`: Data buffer pointer
-    /// - `offsets_ptr`: Offsets buffer pointer
-    /// - `data_len`: Data length in bytes
-    /// - `items_count`: Number of items
+    /// Returns `data_ptr`, `offsets_ptr`, `data_len`, `items_count`.
     ///
     /// # Safety
     ///
-    /// The returned pointers are valid only as long as the CharsTape is not modified.
+    /// Pointers valid only while tape is unmodified.
     pub fn as_raw_parts(&self) -> RawParts<Offset> {
         let data_ptr = self
             .data
@@ -1798,24 +1757,19 @@ impl<'a, Offset: OffsetType, Length: LengthType> CharsSlices<'a, Offset, Length>
     ///
     /// # Errors
     ///
-    /// Returns `OffsetOverflow` if any offset/length exceeds the type's maximum value.
-    /// Returns `IndexOutOfBounds` if any slice is not a subslice of the data buffer.
+    /// - `OffsetOverflow` if offset/length exceeds type maximum
+    /// - `IndexOutOfBounds` if slice not within data buffer
     ///
-    /// # Examples
+    /// # Example
     ///
     /// ```rust
-    /// use stringtape::{CharsSlicesU32U8, StringTapeError};
-    /// use std::borrow::Cow;
-    ///
-    /// let data = "hello world foo bar";
-    ///
+    /// # use stringtape::{CharsSlicesU32U8, StringTapeError};
+    /// # use std::borrow::Cow;
+    /// let data = "hello world";
     /// let slices = CharsSlicesU32U8::from_iter_and_data(
     ///     data.split_whitespace(),
     ///     Cow::Borrowed(data.as_bytes())
     /// )?;
-    ///
-    /// assert_eq!(slices.len(), 4);
-    /// assert_eq!(&slices[0], "hello");
     /// # Ok::<(), StringTapeError>(())
     /// ```
     pub fn from_iter_and_data<I>(iter: I, data: Cow<'a, [u8]>) -> Result<Self, StringTapeError>
@@ -2706,9 +2660,8 @@ impl Default for CharsTapeAuto {
 }
 
 impl CharsTapeAuto {
-    /// Creates CharsTapeAuto from a clonable iterator, automatically selecting
-    /// the smallest offset type (I32, U32, or U64) based on total data size.
-    /// This uses a two-pass approach: first pass calculates total size, second pass builds the tape.
+    /// Creates tape from clonable iterator, auto-selecting offset type (I32/U32/U64) based on total data size.
+    /// Two-pass: first calculates size, second builds tape.
     pub fn from_iter<'a, I>(iter: I) -> Self
     where
         I: IntoIterator<Item = &'a str> + Clone,
@@ -2795,9 +2748,8 @@ impl Default for BytesTapeAuto {
 }
 
 impl BytesTapeAuto {
-    /// Creates BytesTapeAuto from a clonable iterator, automatically selecting
-    /// the smallest offset type (U16, U32, or U64) based on total data size.
-    /// This uses a two-pass approach: first pass calculates total size, second pass builds the tape.
+    /// Creates tape from clonable iterator, auto-selecting offset type (U16/U32/U64) based on total data size.
+    /// Two-pass: first calculates size, second builds tape.
     pub fn from_iter<'a, I>(iter: I) -> Self
     where
         I: IntoIterator<Item = &'a [u8]> + Clone,
@@ -2827,7 +2779,6 @@ impl BytesTapeAuto {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

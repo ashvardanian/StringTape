@@ -12,12 +12,15 @@ Memory-efficient collection classes for variable-length strings, co-located on a
 Why?
 
 ```rust
-let doc = fs::read_to_string("enwik9.txt")?;                                // 1.0 GB
-let _ = Vec::<String>::from_iter(doc.split_whitespace());                   // + 7.1 GB
-let _ = CharsTapeAuto::from_iter(doc.split_whitespace());                   // + 1.3 GB
-let _ = Vec::<&[u8]>::from_iter(doc.split_whitespace().map(str::as_bytes)); // + 1.9 GB
-let _ = CharsSlicesAuto::from_iter_and_data(                                // + 0.7 GB
-    doc.split_whitespace(),
+let doc = fs::read_to_string("enwik9.txt")?;    // 1.0 GB
+let words = doc.split_whitespace();             // ~ 160 M words
+let buffers = words.map(str::as_bytes);
+
+let _ = Vec::<String>::from_iter(words);        // + 7.1 GB copied ❌
+let _ = CharsTapeAuto::from_iter(words);        // + 1.3 GB copied ✅
+let _ = Vec::<&[u8]>::from_iter(buffers);       // + 1.9 GB copy-less ⚠️
+let _ = BytesSlicesAuto::from_iter_and_data(    // + 0.7 GB copy-less ✅
+    buffers,
     Cow::Borrowed(doc.as_bytes()),
 );
 ```
@@ -44,14 +47,16 @@ for s in &tape {
     println!("{}", s);
 }
 
-// Build from iterator
-let tape2: CharsTapeI32 = ["a", "b", "c"].into_iter().collect();
+// Build from iterator with auto type selection
+let tape2 = CharsTapeAuto::from_iter(["a", "b", "c"].iter().copied());
 assert_eq!(tape2.len(), 3);
 
-// Binary data with BytesTape
-let mut bytes = BytesTapeI32::new();
-bytes.push(b"hi")?;
-assert_eq!(&bytes[0], b"hi");
+// Zero-copy slices referencing existing data
+let data = "hello world";
+let slices = CharsSlicesAuto::from_iter_and_data(
+    data.split_whitespace(),
+    Cow::Borrowed(data.as_bytes()),
+)?;
 
 # Ok::<(), StringTapeError>(())
 ```
@@ -82,11 +87,15 @@ for s in &tape { // Iterate
     println!("{}", s);
 }
 
-// Construct from an iterator
+// Construct from iterator
 let tape2: CharsTapeI32 = ["a", "b", "c"].into_iter().collect();
+
+// Sort in-place
+tape.sort();
+tape.sort_by(|a, b| a.len().cmp(&b.len()));
 ```
 
-`BytesTape` provides the same interface for arbitrary byte slices.
+`BytesTape` and `CharsSlicesAuto`/`BytesSlicesAuto` provide the same interface.
 
 ### Views and Slicing
 
@@ -143,17 +152,24 @@ let view = unsafe {
 
 `BytesTape` works the same way with Arrow `BinaryArray`/`LargeBinaryArray` types.
 
+### Auto Type Selection
+
+Auto variants automatically select the most memory-efficient types based on data size:
+
+```rust
+// CharsTapeAuto: selects I32/U32/U64 offset based on total data size
+let tape = CharsTapeAuto::from_iter(strings);
+
+// CharsSlicesAuto: selects offset (U32/U64) and length (U8/U16/U32) types
+let slices = CharsSlicesAuto::from_iter_and_data(strings, data)?;
+```
+
+Available: `CharsTapeAuto`, `BytesTapeAuto`, `CharsSlicesAuto`, `BytesSlicesAuto`.
+
 ### Unsigned Offsets
 
-In addition to the signed offsets (`i32`/`i64` via `CharsTapeI32`/`CharsTapeI64`),
-the library also supports unsigned offsets (`u32`/`u64`) when you prefer non-negative indexing:
-
-- `CharsTapeU32`, `CharsTapeU64`
-- `BytesTapeU32`, `BytesTapeU64`
-- `CharsTapeViewU32<'_>`, `CharsTapeViewU64<'_>`
-- `BytesTapeViewU32<'_>`, `BytesTapeViewU64<'_>`
-
-Note, that unsigned offsets cannot be converted to/from Arrow arrays.
+Unsigned offsets (`u32`/`u64`) are available via `CharsTapeU32`, `CharsTapeU64`, `BytesTapeU16`, `BytesTapeU32`, `BytesTapeU64` and corresponding views.
+These cannot be converted to/from Arrow arrays.
 
 ## `no_std` Support
 
