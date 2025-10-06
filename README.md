@@ -2,14 +2,17 @@
 
 ![StringTape banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/StringTape.png?raw=true)
 
-Memory-efficient collection classes for variable-length strings, co-located on a contiguous "tape".
+Memory-efficient collection classes for variable-length strings, co-located on contiguous "tapes".
 
 - Convertible to __[Apache Arrow](https://arrow.apache.org/)__ `String`/`LargeString` & `Binary`/`LargeBinary` arrays
 - Compatible with __UTF-8 & binary__ strings in Rust via `CharsTape` and `BytesTape`
-- Usable in `no_std` and with custom allocators for GPU & embedded use cases
+- Usable in `no_std` and with custom __allocators__ for GPU & embedded use cases
 - Sliceable into __zero-copy__ borrow-checked views with `[i..n]` range syntax
 
-Why?
+__Why not use `Vec<String>`?__
+The first reason is about __RAM__!
+In addition to storing 3 pointers for every `String` instance, your underlying memory allocator may store 2-4 pointers per heap entry.
+Assuming most English words are under 8 bytes long, storing an extra 6 pointers on a 64-bit machine results in a 7x memory usage amplification:
 
 ```rust
 let doc = fs::read_to_string("enwik9.txt")?;    // 1.0 GB
@@ -25,8 +28,19 @@ let _ = BytesCowsAuto::from_iter_and_data(      // + 0.7 GB copy-less ✅
 );
 ```
 
-"Tape" classes copy data into contiguous buffers for cache-friendly iteration.
-"Cows" classes reference existing data without copies.
+> "Tape" classes copy data into contiguous buffers for cache-friendly iteration.
+> "Cows" classes reference existing data without copies.
+
+The second reason is about __NUMA & GPUs__!
+When designing high-performance systems, memory affinity is crucial.
+On 2-socket servers, developers should avoid accessing memory allocated on the other socket.
+On GPU-equipped servers, data should be transferred to GPU memory in large chunks to hide PCIe and software latency.
+With individual `String` instances scattered around the heap, this is impossible.
+With tapes and cows, this is easy, just don't forget to use custom allocators, like:
+
+- the NUMA-aware `PinnedAllocator` from [Fork Union](https://github.com/ashvardanian/fork_union/),
+- the GPU-friendly `UnifiedAlloc` from [StringZilla](https://github.com/ashvardanian/StringZilla),
+- or any other allocator implementing the [allocator_api2](https://crates.io/crates/allocator_api2) traits.
 
 ## Quick Start
 
@@ -199,7 +213,7 @@ cargo clippy --lib -- -D warnings   # Lint the library code
 cargo fmt --all -- --check          # Check code formatting
 ```
 
-To reproduce memory usage numbers mentioned above, run:
+To reproduce memory usage numbers mentioned above, pull the dataset for the ["Large Text Compression Benchmark"](https://mattmahoney.net/dc/textdata.html), and run:
 
 ```bash
 /usr/bin/time -f "Vec<String>: %M KB | %E" cargo run --release --quiet --bin bench_vec_string -- enwik9.txt
