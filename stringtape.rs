@@ -1326,6 +1326,26 @@ impl<Offset: OffsetType, A: Allocator> CharsTape<Offset, A> {
         })
     }
 
+    /// Creates a CharsSlices view of the tape.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use stringtape::{CharsTapeI32, CharsSlices, StringTapeError};
+    /// # use std::borrow::Cow;
+    /// let mut tape = CharsTapeI32::new();
+    /// tape.extend(["apple", "banana", "cherry"])?;
+    ///
+    /// let slices: CharsSlices<i32, u16> = tape.as_reorderable()?;
+    /// assert_eq!(slices.get(0), Some("apple"));
+    /// # Ok::<(), StringTapeError>(())
+    /// ```
+    pub fn as_reorderable<Length: LengthType>(
+        &self,
+    ) -> Result<CharsSlices<'_, Offset, Length>, StringTapeError> {
+        CharsSlices::from_iter_and_data(self, Cow::Borrowed(self.data_slice()))
+    }
+
     /// Returns data and offsets slices for zero-copy Arrow conversion.
     pub fn arrow_slices(&self) -> (&[u8], &[Offset]) {
         (self.data_slice(), self.offsets_slice())
@@ -1541,6 +1561,36 @@ impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
         })
     }
 
+    /// Creates a BytesSlices view of the tape.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use stringtape::{BytesTapeI32, BytesSlices, StringTapeError};
+    /// # use std::borrow::Cow;
+    /// let mut tape = BytesTapeI32::new();
+    /// tape.push(&[1, 2, 3])?;
+    /// tape.push(&[4, 5, 6])?;
+    /// tape.push(&[7, 8, 9])?;
+    ///
+    /// let slices: BytesSlices<i32, u16> = tape.as_reorderable()?;
+    /// assert_eq!(slices.get(0), Some(&[1, 2, 3][..]));
+    /// # Ok::<(), StringTapeError>(())
+    /// ```
+    pub fn as_reorderable<Length: LengthType>(
+        &self,
+    ) -> Result<BytesSlices<'_, Offset, Length>, StringTapeError> {
+        let offsets = self.offsets_slice();
+        BytesSlices::from_iter_and_data(
+            (0..self.len()).map(|idx| {
+                let start = offsets[idx].to_usize();
+                let end = offsets[idx + 1].to_usize();
+                (start, end - start)
+            }),
+            Cow::Borrowed(self.data_slice()),
+        )
+    }
+
     /// Returns data and offsets slices for zero-copy Arrow conversion.
     pub fn arrow_slices(&self) -> (&[u8], &[Offset]) {
         (self.data_slice(), self.offsets_slice())
@@ -1688,7 +1738,7 @@ impl<Offset: OffsetType> Default for CharsTape<Offset, Global> {
 ///
 /// For example, `(u64, u8)` tuple uses 16 bytes (8 + 8 padding), but
 /// `PackedEntry<u64, u8>` uses only 9 bytes (8 + 1).
-#[repr(packed(1))]
+#[repr(C, packed(1))]
 #[derive(Copy, Clone, Debug)]
 struct PackedEntry<Offset, Length> {
     offset: Offset,
@@ -2607,21 +2657,16 @@ impl<'a> BytesSlicesAuto<'a> {
 // ========================
 
 /// Automatically selects the most memory-efficient CharsTape offset type.
-pub enum CharsTapeAuto {
-    I32(CharsTapeI32),
-    U32(CharsTapeU32),
-    U64(CharsTapeU64),
+pub enum CharsTapeAuto<A: Allocator = Global> {
+    I32(CharsTape<i32, A>),
+    U32(CharsTape<u32, A>),
+    U64(CharsTape<u64, A>),
 }
 
-impl CharsTapeAuto {
-    /// Creates CharsTapeAuto, selecting offset type based on expected size.
-    pub fn new() -> Self {
-        Self::I32(CharsTapeI32::new())
-    }
-
-    /// Creates CharsTapeAuto with u64 offsets for large datasets (>2GB).
-    pub fn new_large() -> Self {
-        Self::U64(CharsTapeU64::new())
+impl<A: Allocator> CharsTapeAuto<A> {
+    /// Creates CharsTapeAuto with custom allocator.
+    pub fn new_in(allocator: A) -> Self {
+        Self::I32(CharsTape::new_in(allocator))
     }
 
     pub fn push(&mut self, s: &str) -> Result<(), StringTapeError> {
@@ -2653,16 +2698,16 @@ impl CharsTapeAuto {
     }
 }
 
-impl Default for CharsTapeAuto {
+impl Default for CharsTapeAuto<Global> {
     fn default() -> Self {
-        Self::new()
+        Self::new_in(Global)
     }
 }
 
-impl CharsTapeAuto {
+impl<A: Allocator + Clone> CharsTapeAuto<A> {
     /// Creates tape from clonable iterator, auto-selecting offset type (I32/U32/U64) based on total data size.
     /// Two-pass: first calculates size, second builds tape.
-    pub fn from_iter<'a, I>(iter: I) -> Self
+    pub fn from_iter_in<'a, I>(iter: I, allocator: A) -> Self
     where
         I: IntoIterator<Item = &'a str> + Clone,
     {
@@ -2671,19 +2716,19 @@ impl CharsTapeAuto {
 
         // Choose optimal type based on data size
         if total_size <= i32::MAX as usize {
-            let mut tape = CharsTapeI32::new();
+            let mut tape = CharsTape::new_in(allocator);
             for s in iter {
                 tape.push(s).ok();
             }
             Self::I32(tape)
         } else if total_size <= u32::MAX as usize {
-            let mut tape = CharsTapeU32::new();
+            let mut tape = CharsTape::new_in(allocator);
             for s in iter {
                 tape.push(s).ok();
             }
             Self::U32(tape)
         } else {
-            let mut tape = CharsTapeU64::new();
+            let mut tape = CharsTape::new_in(allocator);
             for s in iter {
                 tape.push(s).ok();
             }
@@ -2692,24 +2737,32 @@ impl CharsTapeAuto {
     }
 }
 
+impl CharsTapeAuto<Global> {
+    /// Creates tape from clonable iterator with global allocator.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_iter<'a, I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = &'a str> + Clone,
+    {
+        Self::from_iter_in(iter, Global)
+    }
+}
+
 // ========================
 // Auto-selecting BytesTape
 // ========================
 
 /// Automatically selects the most memory-efficient BytesTape offset type.
-pub enum BytesTapeAuto {
-    U16(BytesTapeU16),
-    U32(BytesTapeU32),
-    U64(BytesTapeU64),
+pub enum BytesTapeAuto<A: Allocator = Global> {
+    U16(BytesTape<u16, A>),
+    U32(BytesTape<u32, A>),
+    U64(BytesTape<u64, A>),
 }
 
-impl BytesTapeAuto {
-    pub fn new() -> Self {
-        Self::U16(BytesTapeU16::new())
-    }
-
-    pub fn new_large() -> Self {
-        Self::U64(BytesTapeU64::new())
+impl<A: Allocator> BytesTapeAuto<A> {
+    /// Creates BytesTapeAuto with custom allocator.
+    pub fn new_in(allocator: A) -> Self {
+        Self::U16(BytesTape::new_in(allocator))
     }
 
     pub fn push(&mut self, bytes: &[u8]) -> Result<(), StringTapeError> {
@@ -2741,16 +2794,16 @@ impl BytesTapeAuto {
     }
 }
 
-impl Default for BytesTapeAuto {
+impl Default for BytesTapeAuto<Global> {
     fn default() -> Self {
-        Self::new()
+        Self::new_in(Global)
     }
 }
 
-impl BytesTapeAuto {
+impl<A: Allocator + Clone> BytesTapeAuto<A> {
     /// Creates tape from clonable iterator, auto-selecting offset type (U16/U32/U64) based on total data size.
     /// Two-pass: first calculates size, second builds tape.
-    pub fn from_iter<'a, I>(iter: I) -> Self
+    pub fn from_iter_in<'a, I>(iter: I, allocator: A) -> Self
     where
         I: IntoIterator<Item = &'a [u8]> + Clone,
     {
@@ -2759,24 +2812,35 @@ impl BytesTapeAuto {
 
         // Choose optimal type based on data size
         if total_size <= u16::MAX as usize {
-            let mut tape = BytesTapeU16::new();
+            let mut tape = BytesTape::new_in(allocator);
             for bytes in iter {
                 tape.push(bytes).ok();
             }
             Self::U16(tape)
         } else if total_size <= u32::MAX as usize {
-            let mut tape = BytesTapeU32::new();
+            let mut tape = BytesTape::new_in(allocator);
             for bytes in iter {
                 tape.push(bytes).ok();
             }
             Self::U32(tape)
         } else {
-            let mut tape = BytesTapeU64::new();
+            let mut tape = BytesTape::new_in(allocator);
             for bytes in iter {
                 tape.push(bytes).ok();
             }
             Self::U64(tape)
         }
+    }
+}
+
+impl BytesTapeAuto<Global> {
+    /// Creates tape from clonable iterator with global allocator.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_iter<'a, I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = &'a [u8]> + Clone,
+    {
+        Self::from_iter_in(iter, Global)
     }
 }
 
