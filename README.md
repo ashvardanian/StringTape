@@ -2,12 +2,28 @@
 
 ![StringTape banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/StringTape.png?raw=true)
 
-A memory-efficient collection for variable-length strings, co-located on a contiguous "tape".
+Memory-efficient collection classes for variable-length strings, co-located on a contiguous "tape".
 
 - Convertible to __[Apache Arrow](https://arrow.apache.org/)__ `String`/`LargeString` & `Binary`/`LargeBinary` arrays
 - Compatible with __UTF-8 & binary__ strings in Rust via `CharsTape` and `BytesTape`
 - Usable in `no_std` and with custom allocators for GPU & embedded use cases
 - Sliceable into __zero-copy__ borrow-checked views with `[i..n]` range syntax
+
+Why?
+
+```rust
+let doc = fs::read_to_string("enwik9.txt")?;                                // 1.0 GB
+let _ = Vec::<String>::from_iter(doc.split_whitespace());                   // + 7.1 GB
+let _ = CharsTapeAuto::from_iter(doc.split_whitespace());                   // + 1.3 GB
+let _ = Vec::<&[u8]>::from_iter(doc.split_whitespace().map(str::as_bytes)); // + 1.9 GB
+let _ = CharsSlicesAuto::from_iter_and_data(                                // + 0.7 GB
+    doc.split_whitespace(),
+    Cow::Borrowed(doc.as_bytes()),
+);
+```
+
+Tape classes copy data into contiguous buffers for cache-friendly iteration.
+Slices classes reference existing data without copies.
 
 ## Quick Start
 
@@ -163,4 +179,15 @@ cargo test                          # Test with std (default)
 cargo test --doc                    # Test documentation examples
 cargo test --no-default-features    # Test without std
 cargo test --all-features           # Test with all features enabled
+cargo clippy --lib -- -D warnings   # Lint the library code
+cargo fmt --all -- --check          # Check code formatting
+```
+
+To reproduce memory usage numbers mentioned above, run:
+
+```bash
+/usr/bin/time -f "Vec<String>: %M KB | %E" cargo run --release --quiet --bin bench_vec_string -- enwik9.txt
+/usr/bin/time -f "Vec<&[u8]>: %M KB | %E" cargo run --release --quiet --bin bench_vec_slice -- enwik9.txt
+/usr/bin/time -f "CharsSlicesAuto: %M KB | %E" cargo run --release --quiet --bin bench_chars_slices -- enwik9.txt
+/usr/bin/time -f "CharsTapeAuto: %M KB | %E" cargo run --release --quiet --bin bench_chars_tape -- enwik9.txt
 ```

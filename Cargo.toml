@@ -21,3 +21,19 @@ arrow = { version = "53", default-features = false }
 [features]
 default = ["std"]
 std = ["allocator-api2/std"]
+
+[[bin]]
+name = "bench_vec_string"
+path = "stringtape.rs"
+
+[[bin]]
+name = "bench_vec_slice"
+path = "stringtape.rs"
+
+[[bin]]
+name = "bench_chars_slices"
+path = "stringtape.rs"
+
+[[bin]]
+name = "bench_chars_tape"
+path = "stringtape.rs"
