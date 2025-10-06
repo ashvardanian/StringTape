@@ -2859,6 +2859,65 @@ impl<'a> BytesCowsAuto<'a> {
             Self::U64U32(s) => Ok(CharsCowsAuto::U64U32(s.as_chars()?)),
         }
     }
+
+    /// Returns an iterator over the byte cows.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::BytesCowsAuto;
+    /// use std::borrow::Cow;
+    ///
+    /// let data = b"hello world foo";
+    /// let bytes = BytesCowsAuto::from_iter_and_data(
+    ///     data.split(|&b| b == b' '),
+    ///     Cow::Borrowed(&data[..])
+    /// ).unwrap();
+    ///
+    /// let slices: Vec<&[u8]> = bytes.iter().collect();
+    /// assert_eq!(slices, vec![&b"hello"[..], &b"world"[..], &b"foo"[..]]);
+    /// # Ok::<(), stringtape::StringTapeError>(())
+    /// ```
+    pub fn iter(&self) -> BytesCowsAutoIter<'_> {
+        BytesCowsAutoIter {
+            inner: self,
+            index: 0,
+        }
+    }
+}
+
+/// Iterator over BytesCowsAuto byte cows.
+pub struct BytesCowsAutoIter<'a> {
+    inner: &'a BytesCowsAuto<'a>,
+    index: usize,
+}
+
+impl<'a> Iterator for BytesCowsAutoIter<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let result = self.inner.get(self.index);
+        if result.is_some() {
+            self.index += 1;
+        }
+        result
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.inner.len() - self.index;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'a> ExactSizeIterator for BytesCowsAutoIter<'a> {}
+
+impl<'a> IntoIterator for &'a BytesCowsAuto<'a> {
+    type Item = &'a [u8];
+    type IntoIter = BytesCowsAutoIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
 }
 
 // ========================
