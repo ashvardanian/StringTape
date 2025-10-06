@@ -2168,6 +2168,46 @@ impl<'a, Offset: OffsetType, Length: LengthType> BytesCows<'a, Offset, Length> {
     pub fn data(&self) -> &[u8] {
         &self.data
     }
+
+    /// Returns a zero-copy view of this `BytesCows` as a `CharsCows` if all slices are valid UTF-8.
+    ///
+    /// This validates that all byte slices contain valid UTF-8, then reinterprets the collection
+    /// as strings without copying or moving any data.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StringTapeError::Utf8Error` if any slice contains invalid UTF-8.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::BytesCowsU32U8;
+    /// use std::borrow::Cow;
+    ///
+    /// let data = b"hello world";
+    /// let bytes = BytesCowsU32U8::from_iter_and_data(
+    ///     data.split(|&b| b == b' '),
+    ///     Cow::Borrowed(&data[..])
+    /// ).unwrap();
+    ///
+    /// let chars = bytes.as_chars().unwrap();
+    /// assert_eq!(chars.get(0), Some("hello"));
+    /// assert_eq!(chars.get(1), Some("world"));
+    /// # Ok::<(), stringtape::StringTapeError>(())
+    /// ```
+    pub fn as_chars(&self) -> Result<CharsCows<'_, Offset, Length>, StringTapeError> {
+        // Validate that all slices contain valid UTF-8
+        for i in 0..self.len() {
+            let slice = self.get(i).ok_or(StringTapeError::IndexOutOfBounds)?;
+            core::str::from_utf8(slice).map_err(StringTapeError::Utf8Error)?;
+        }
+
+        // Safety: All slices validated as UTF-8
+        Ok(CharsCows {
+            data: Cow::Borrowed(self.data.as_ref()),
+            entries: self.entries.clone(),
+        })
+    }
 }
 
 pub struct CharsCowsIter<'a, Offset: OffsetType, Length: LengthType> {
@@ -2306,6 +2346,35 @@ impl<'a, Offset: OffsetType, Length: LengthType> BytesCows<'a, Offset, Length> {
 impl<'a, Offset: OffsetType, Length: LengthType> CharsCows<'a, Offset, Length> {
     pub fn into_bytes_slices(self) -> BytesCows<'a, Offset, Length> {
         self.into()
+    }
+
+    /// Returns a zero-copy view of this `CharsCows` as a `BytesCows`.
+    ///
+    /// This is a no-cost operation that reinterprets the string collection as bytes
+    /// without copying or moving any data.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::CharsCowsU32U8;
+    /// use std::borrow::Cow;
+    ///
+    /// let data = "hello world";
+    /// let cows = CharsCowsU32U8::from_iter_and_data(
+    ///     data.split_whitespace(),
+    ///     Cow::Borrowed(data.as_bytes())
+    /// ).unwrap();
+    ///
+    /// let bytes = cows.as_bytes();
+    /// assert_eq!(bytes.get(0), Some(&b"hello"[..]));
+    /// assert_eq!(bytes.get(1), Some(&b"world"[..]));
+    /// # Ok::<(), stringtape::StringTapeError>(())
+    /// ```
+    pub fn as_bytes(&self) -> BytesCows<'_, Offset, Length> {
+        BytesCows {
+            data: Cow::Borrowed(self.data.as_ref()),
+            entries: self.entries.clone(),
+        }
     }
 }
 
@@ -2605,6 +2674,39 @@ impl<'a> CharsCowsAuto<'a> {
             Self::U64U32(s) => s.sort_by_key(f),
         }
     }
+
+    /// Returns a zero-copy view of this `CharsCowsAuto` as a `BytesCowsAuto`.
+    ///
+    /// This is a no-cost operation that reinterprets the string collection as bytes
+    /// without copying or moving any data.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::CharsCowsAuto;
+    /// use std::borrow::Cow;
+    ///
+    /// let data = "hello world";
+    /// let cows = CharsCowsAuto::from_iter_and_data(
+    ///     data.split_whitespace(),
+    ///     Cow::Borrowed(data.as_bytes())
+    /// ).unwrap();
+    ///
+    /// let bytes = cows.as_bytes();
+    /// assert_eq!(bytes.get(0), Some(&b"hello"[..]));
+    /// assert_eq!(bytes.get(1), Some(&b"world"[..]));
+    /// # Ok::<(), stringtape::StringTapeError>(())
+    /// ```
+    pub fn as_bytes(&self) -> BytesCowsAuto<'_> {
+        match self {
+            Self::U32U8(s) => BytesCowsAuto::U32U8(s.as_bytes()),
+            Self::U32U16(s) => BytesCowsAuto::U32U16(s.as_bytes()),
+            Self::U32U32(s) => BytesCowsAuto::U32U32(s.as_bytes()),
+            Self::U64U8(s) => BytesCowsAuto::U64U8(s.as_bytes()),
+            Self::U64U16(s) => BytesCowsAuto::U64U16(s.as_bytes()),
+            Self::U64U32(s) => BytesCowsAuto::U64U32(s.as_bytes()),
+        }
+    }
 }
 
 /// Iterator over CharsCowsAuto string cows.
@@ -2718,6 +2820,43 @@ impl<'a> BytesCowsAuto<'a> {
             Self::U64U8(s) => s.get(index),
             Self::U64U16(s) => s.get(index),
             Self::U64U32(s) => s.get(index),
+        }
+    }
+
+    /// Returns a zero-copy view of this `BytesCowsAuto` as a `CharsCowsAuto` if all slices are valid UTF-8.
+    ///
+    /// This validates that all byte slices contain valid UTF-8, then reinterprets the collection
+    /// as strings without copying or moving any data.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StringTapeError::Utf8Error` if any slice contains invalid UTF-8.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::BytesCowsAuto;
+    /// use std::borrow::Cow;
+    ///
+    /// let data = b"hello world";
+    /// let bytes = BytesCowsAuto::from_iter_and_data(
+    ///     data.split(|&b| b == b' '),
+    ///     Cow::Borrowed(&data[..])
+    /// ).unwrap();
+    ///
+    /// let chars = bytes.as_chars().unwrap();
+    /// assert_eq!(chars.get(0), Some("hello"));
+    /// assert_eq!(chars.get(1), Some("world"));
+    /// # Ok::<(), stringtape::StringTapeError>(())
+    /// ```
+    pub fn as_chars(&self) -> Result<CharsCowsAuto<'_>, StringTapeError> {
+        match self {
+            Self::U32U8(s) => Ok(CharsCowsAuto::U32U8(s.as_chars()?)),
+            Self::U32U16(s) => Ok(CharsCowsAuto::U32U16(s.as_chars()?)),
+            Self::U32U32(s) => Ok(CharsCowsAuto::U32U32(s.as_chars()?)),
+            Self::U64U8(s) => Ok(CharsCowsAuto::U64U8(s.as_chars()?)),
+            Self::U64U16(s) => Ok(CharsCowsAuto::U64U16(s.as_chars()?)),
+            Self::U64U32(s) => Ok(CharsCowsAuto::U64U32(s.as_chars()?)),
         }
     }
 }
