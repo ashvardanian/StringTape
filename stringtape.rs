@@ -15,11 +15,34 @@
 //!
 //! assert_eq!(tape.len(), 2);
 //! assert_eq!(&tape[0], "hello");
+//! assert!(tape.contains("hello"));
 //!
-//! // Iterate over strings
+//! // Forward and reverse iteration
 //! for s in &tape {
 //!     println!("{}", s);
 //! }
+//! for s in tape.iter().rev() {
+//!     println!("{}", s);
+//! }
+//! # Ok::<(), StringTapeError>(())
+//! ```
+//!
+//! ## Standard Traits
+//!
+//! All types implement standard traits for seamless integration:
+//!
+//! ```rust
+//! use stringtape::{CharsTapeI32, StringTapeError};
+//! use std::collections::HashMap;
+//!
+//! let mut tape1 = CharsTapeI32::new();
+//! tape1.push("a")?;
+//! let tape2 = tape1.clone();              // Clone
+//! assert_eq!(tape1, tape2);               // PartialEq, Eq
+//! assert!(tape1 <= tape2);                // PartialOrd, Ord
+//!
+//! let mut map = HashMap::new();
+//! map.insert(tape1, 42);                  // Hash
 //! # Ok::<(), StringTapeError>(())
 //! ```
 //!
@@ -62,7 +85,9 @@ extern crate std;
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+use core::cmp::Ordering;
 use core::fmt;
+use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
 use core::ops::{
     Index, Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive, Sub,
@@ -470,6 +495,21 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
         Ok(())
     }
 
+    pub fn shrink_to_fit(&mut self) -> Result<(), StringTapeError> {
+        let data_len = self.data_len();
+        let offsets_len = self.len() + 1;
+
+        if data_len < self.data_capacity() {
+            self.shrink_data(data_len)?;
+        }
+
+        if offsets_len < self.offsets_capacity() {
+            self.shrink_offsets(offsets_len)?;
+        }
+
+        Ok(())
+    }
+
     fn grow_data(&mut self, new_capacity: usize) -> Result<(), StringTapeError> {
         let current_capacity = self.data_capacity();
         if new_capacity <= current_capacity {
@@ -523,6 +563,52 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
         };
 
         self.offsets = Some(NonNull::slice_from_raw_parts(new_ptr.cast(), new_capacity));
+        Ok(())
+    }
+
+    fn shrink_data(&mut self, new_capacity: usize) -> Result<(), StringTapeError> {
+        let current_capacity = self.data_capacity();
+        if new_capacity >= current_capacity || new_capacity == 0 {
+            return Ok(());
+        }
+
+        if let Some(old_ptr) = self.data {
+            let old_layout = Layout::array::<u8>(current_capacity).unwrap();
+            let new_layout =
+                Layout::array::<u8>(new_capacity).map_err(|_| StringTapeError::AllocationError)?;
+
+            let new_ptr = unsafe {
+                self.allocator
+                    .shrink(old_ptr.cast(), old_layout, new_layout)
+                    .map_err(|_| StringTapeError::AllocationError)?
+            };
+
+            self.data = Some(NonNull::slice_from_raw_parts(new_ptr.cast(), new_capacity));
+        }
+
+        Ok(())
+    }
+
+    fn shrink_offsets(&mut self, new_capacity: usize) -> Result<(), StringTapeError> {
+        let current_capacity = self.offsets_capacity();
+        if new_capacity >= current_capacity || new_capacity == 0 {
+            return Ok(());
+        }
+
+        if let Some(old_ptr) = self.offsets {
+            let old_layout = Layout::array::<Offset>(current_capacity).unwrap();
+            let new_layout = Layout::array::<Offset>(new_capacity)
+                .map_err(|_| StringTapeError::AllocationError)?;
+
+            let new_ptr = unsafe {
+                self.allocator
+                    .shrink(old_ptr.cast(), old_layout, new_layout)
+                    .map_err(|_| StringTapeError::AllocationError)?
+            };
+
+            self.offsets = Some(NonNull::slice_from_raw_parts(new_ptr.cast(), new_capacity));
+        }
+
         Ok(())
     }
 
@@ -1103,7 +1189,8 @@ impl<'a, Offset: OffsetType> CharsTapeView<'a, Offset> {
     pub fn iter(&'a self) -> CharsTapeViewIter<'a, Offset> {
         CharsTapeViewIter {
             view: self,
-            index: 0,
+            front: 0,
+            back: self.len(),
         }
     }
 }
@@ -1111,27 +1198,51 @@ impl<'a, Offset: OffsetType> CharsTapeView<'a, Offset> {
 /// Iterator over CharsTapeView strings.
 pub struct CharsTapeViewIter<'a, Offset: OffsetType> {
     view: &'a CharsTapeView<'a, Offset>,
-    index: usize,
+    front: usize,
+    back: usize,
 }
 
 impl<'a, Offset: OffsetType> Iterator for CharsTapeViewIter<'a, Offset> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let result = self.view.get(self.index);
+        if self.front >= self.back {
+            return None;
+        }
+        let result = self.view.get(self.front);
         if result.is_some() {
-            self.index += 1;
+            self.front += 1;
         }
         result
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.view.len() - self.index;
+        let remaining = self.back.saturating_sub(self.front);
         (remaining, Some(remaining))
     }
 }
 
+impl<'a, Offset: OffsetType> DoubleEndedIterator for CharsTapeViewIter<'a, Offset> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front >= self.back {
+            return None;
+        }
+        self.back -= 1;
+        self.view.get(self.back)
+    }
+}
+
 impl<'a, Offset: OffsetType> ExactSizeIterator for CharsTapeViewIter<'a, Offset> {}
+
+impl<'a, Offset: OffsetType> fmt::Debug for CharsTapeViewIter<'a, Offset> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CharsTapeViewIter")
+            .field("front", &self.front)
+            .field("back", &self.back)
+            .field("remaining", &self.back.saturating_sub(self.front))
+            .finish()
+    }
+}
 
 impl<'a, Offset: OffsetType> Index<usize> for CharsTapeView<'a, Offset> {
     type Output = str;
@@ -1147,6 +1258,66 @@ impl<'a, Offset: OffsetType> IntoIterator for &'a CharsTapeView<'a, Offset> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+unsafe impl<Offset: OffsetType + Send> Send for CharsTapeView<'_, Offset> {}
+unsafe impl<Offset: OffsetType + Sync> Sync for CharsTapeView<'_, Offset> {}
+
+impl<'a, Offset: OffsetType> fmt::Debug for CharsTapeView<'a, Offset> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CharsTapeView")
+            .field("len", &self.len())
+            .field("data_len", &self.data_len())
+            .finish()
+    }
+}
+
+impl<'a, Offset: OffsetType> PartialEq for CharsTapeView<'a, Offset> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        for i in 0..self.len() {
+            if self.get(i) != other.get(i) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl<'a, Offset: OffsetType> Eq for CharsTapeView<'a, Offset> {}
+
+impl<'a, Offset: OffsetType> Hash for CharsTapeView<'a, Offset> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        for i in 0..self.len() {
+            if let Some(s) = self.get(i) {
+                s.hash(state);
+            }
+        }
+    }
+}
+
+impl<'a, Offset: OffsetType> PartialOrd for CharsTapeView<'a, Offset> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a, Offset: OffsetType> Ord for CharsTapeView<'a, Offset> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let min_len = self.len().min(other.len());
+        for i in 0..min_len {
+            if let (Some(a), Some(b)) = (self.get(i), other.get(i)) {
+                let ord = a.cmp(b);
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+        self.len().cmp(&other.len())
     }
 }
 
@@ -1209,7 +1380,8 @@ impl<'a, Offset: OffsetType> BytesTapeView<'a, Offset> {
     pub fn iter(&'a self) -> BytesTapeViewIter<'a, Offset> {
         BytesTapeViewIter {
             view: self,
-            index: 0,
+            front: 0,
+            back: self.len(),
         }
     }
 }
@@ -1217,27 +1389,51 @@ impl<'a, Offset: OffsetType> BytesTapeView<'a, Offset> {
 /// Iterator over BytesTapeView byte slices.
 pub struct BytesTapeViewIter<'a, Offset: OffsetType> {
     view: &'a BytesTapeView<'a, Offset>,
-    index: usize,
+    front: usize,
+    back: usize,
 }
 
 impl<'a, Offset: OffsetType> Iterator for BytesTapeViewIter<'a, Offset> {
     type Item = &'a [u8];
 
     fn next(&mut self) -> Option<Self::Item> {
-        let result = self.view.get(self.index);
+        if self.front >= self.back {
+            return None;
+        }
+        let result = self.view.get(self.front);
         if result.is_some() {
-            self.index += 1;
+            self.front += 1;
         }
         result
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.view.len() - self.index;
+        let remaining = self.back.saturating_sub(self.front);
         (remaining, Some(remaining))
     }
 }
 
+impl<'a, Offset: OffsetType> DoubleEndedIterator for BytesTapeViewIter<'a, Offset> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front >= self.back {
+            return None;
+        }
+        self.back -= 1;
+        self.view.get(self.back)
+    }
+}
+
 impl<'a, Offset: OffsetType> ExactSizeIterator for BytesTapeViewIter<'a, Offset> {}
+
+impl<'a, Offset: OffsetType> fmt::Debug for BytesTapeViewIter<'a, Offset> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BytesTapeViewIter")
+            .field("front", &self.front)
+            .field("back", &self.back)
+            .field("remaining", &self.back.saturating_sub(self.front))
+            .finish()
+    }
+}
 
 impl<'a, Offset: OffsetType> Index<usize> for BytesTapeView<'a, Offset> {
     type Output = [u8];
@@ -1253,6 +1449,66 @@ impl<'a, Offset: OffsetType> IntoIterator for &'a BytesTapeView<'a, Offset> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+unsafe impl<Offset: OffsetType + Send> Send for BytesTapeView<'_, Offset> {}
+unsafe impl<Offset: OffsetType + Sync> Sync for BytesTapeView<'_, Offset> {}
+
+impl<'a, Offset: OffsetType> fmt::Debug for BytesTapeView<'a, Offset> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BytesTapeView")
+            .field("len", &self.len())
+            .field("data_len", &self.data_len())
+            .finish()
+    }
+}
+
+impl<'a, Offset: OffsetType> PartialEq for BytesTapeView<'a, Offset> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        for i in 0..self.len() {
+            if self.get(i) != other.get(i) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl<'a, Offset: OffsetType> Eq for BytesTapeView<'a, Offset> {}
+
+impl<'a, Offset: OffsetType> Hash for BytesTapeView<'a, Offset> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        for i in 0..self.len() {
+            if let Some(bytes) = self.get(i) {
+                bytes.hash(state);
+            }
+        }
+    }
+}
+
+impl<'a, Offset: OffsetType> PartialOrd for BytesTapeView<'a, Offset> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a, Offset: OffsetType> Ord for BytesTapeView<'a, Offset> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let min_len = self.len().min(other.len());
+        for i in 0..min_len {
+            if let (Some(a), Some(b)) = (self.get(i), other.get(i)) {
+                let ord = a.cmp(b);
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+        self.len().cmp(&other.len())
     }
 }
 
@@ -1353,6 +1609,47 @@ impl<Offset: OffsetType, A: Allocator> CharsTape<Offset, A> {
         self.inner.truncate(len)
     }
 
+    /// Returns a reference to the first string, or `None` if empty.
+    pub fn first(&self) -> Option<&str> {
+        self.get(0)
+    }
+
+    /// Returns a reference to the last string, or `None` if empty.
+    pub fn last(&self) -> Option<&str> {
+        if self.is_empty() {
+            None
+        } else {
+            self.get(self.len() - 1)
+        }
+    }
+
+    /// Removes and returns the last string, or `None` if empty.
+    pub fn pop(&mut self) -> Option<()> {
+        if self.is_empty() {
+            None
+        } else {
+            self.truncate(self.len() - 1);
+            Some(())
+        }
+    }
+
+    /// Returns true if the tape contains the given string.
+    pub fn contains(&self, item: &str) -> bool {
+        for i in 0..self.len() {
+            if let Some(s) = self.get(i) {
+                if s == item {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Shrinks allocated capacity to fit current data.
+    pub fn shrink_to_fit(&mut self) -> Result<(), StringTapeError> {
+        self.inner.shrink_to_fit()
+    }
+
     /// Extends the CharsTape with the contents of an iterator.
     pub fn extend<I>(&mut self, iter: I) -> Result<(), StringTapeError>
     where
@@ -1383,7 +1680,8 @@ impl<Offset: OffsetType, A: Allocator> CharsTape<Offset, A> {
     pub fn iter(&self) -> CharsTapeIter<'_, Offset, A> {
         CharsTapeIter {
             tape: self,
-            index: 0,
+            front: 0,
+            back: self.len(),
         }
     }
 
@@ -1446,29 +1744,122 @@ impl<Offset: OffsetType, A: Allocator> Drop for CharsTape<Offset, A> {
 unsafe impl<Offset: OffsetType + Send, A: Allocator + Send> Send for CharsTape<Offset, A> {}
 unsafe impl<Offset: OffsetType + Sync, A: Allocator + Sync> Sync for CharsTape<Offset, A> {}
 
+impl<Offset: OffsetType, A: Allocator> fmt::Debug for CharsTape<Offset, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CharsTape")
+            .field("len", &self.len())
+            .field("data_len", &self.data_len())
+            .finish()
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> PartialEq for CharsTape<Offset, A> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        for i in 0..self.len() {
+            if self.get(i) != other.get(i) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Eq for CharsTape<Offset, A> {}
+
+impl<Offset: OffsetType, A: Allocator> Hash for CharsTape<Offset, A> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        for i in 0..self.len() {
+            if let Some(s) = self.get(i) {
+                s.hash(state);
+            }
+        }
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> PartialOrd for CharsTape<Offset, A> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Ord for CharsTape<Offset, A> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let min_len = self.len().min(other.len());
+        for i in 0..min_len {
+            if let (Some(a), Some(b)) = (self.get(i), other.get(i)) {
+                let ord = a.cmp(b);
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+        self.len().cmp(&other.len())
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator + Clone> Clone for CharsTape<Offset, A> {
+    fn clone(&self) -> Self {
+        let mut cloned = Self::new_in(self.inner.allocator.clone());
+        for i in 0..self.len() {
+            if let Some(s) = self.get(i) {
+                let _ = cloned.push(s);
+            }
+        }
+        cloned
+    }
+}
+
 pub struct CharsTapeIter<'a, Offset: OffsetType, A: Allocator> {
     tape: &'a CharsTape<Offset, A>,
-    index: usize,
+    front: usize,
+    back: usize,
 }
 
 impl<'a, Offset: OffsetType, A: Allocator> Iterator for CharsTapeIter<'a, Offset, A> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let result = self.tape.get(self.index);
+        if self.front >= self.back {
+            return None;
+        }
+        let result = self.tape.get(self.front);
         if result.is_some() {
-            self.index += 1;
+            self.front += 1;
         }
         result
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.tape.len() - self.index;
+        let remaining = self.back.saturating_sub(self.front);
         (remaining, Some(remaining))
     }
 }
 
+impl<'a, Offset: OffsetType, A: Allocator> DoubleEndedIterator for CharsTapeIter<'a, Offset, A> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front >= self.back {
+            return None;
+        }
+        self.back -= 1;
+        self.tape.get(self.back)
+    }
+}
+
 impl<'a, Offset: OffsetType, A: Allocator> ExactSizeIterator for CharsTapeIter<'a, Offset, A> {}
+
+impl<'a, Offset: OffsetType, A: Allocator> fmt::Debug for CharsTapeIter<'a, Offset, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CharsTapeIter")
+            .field("front", &self.front)
+            .field("back", &self.back)
+            .field("remaining", &self.back.saturating_sub(self.front))
+            .finish()
+    }
+}
 
 impl<Offset: OffsetType> FromIterator<String> for CharsTape<Offset, Global> {
     fn from_iter<I: IntoIterator<Item = String>>(iter: I) -> Self {
@@ -1506,6 +1897,14 @@ impl<'a, Offset: OffsetType, A: Allocator> IntoIterator for &'a CharsTape<Offset
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+impl<'a, Offset: OffsetType, A: Allocator> Extend<&'a str> for CharsTape<Offset, A> {
+    fn extend<I: IntoIterator<Item = &'a str>>(&mut self, iter: I) {
+        for s in iter {
+            let _ = self.push(s);
+        }
     }
 }
 
@@ -1598,6 +1997,47 @@ impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
         self.inner.truncate(len)
     }
 
+    /// Returns a reference to the first item, or `None` if empty.
+    pub fn first(&self) -> Option<&[u8]> {
+        self.get(0)
+    }
+
+    /// Returns a reference to the last item, or `None` if empty.
+    pub fn last(&self) -> Option<&[u8]> {
+        if self.is_empty() {
+            None
+        } else {
+            self.get(self.len() - 1)
+        }
+    }
+
+    /// Removes and returns the last item, or `None` if empty.
+    pub fn pop(&mut self) -> Option<()> {
+        if self.is_empty() {
+            None
+        } else {
+            self.truncate(self.len() - 1);
+            Some(())
+        }
+    }
+
+    /// Returns true if the tape contains the given byte slice.
+    pub fn contains(&self, item: &[u8]) -> bool {
+        for i in 0..self.len() {
+            if let Some(bytes) = self.get(i) {
+                if bytes == item {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Shrinks allocated capacity to fit current data.
+    pub fn shrink_to_fit(&mut self) -> Result<(), StringTapeError> {
+        self.inner.shrink_to_fit()
+    }
+
     /// Extends the tape with the contents of an iterator of bytes.
     pub fn extend<I>(&mut self, iter: I) -> Result<(), StringTapeError>
     where
@@ -1638,7 +2078,8 @@ impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
     pub fn iter(&self) -> BytesTapeIter<'_, Offset, A> {
         BytesTapeIter {
             tape: self,
-            index: 0,
+            front: 0,
+            back: self.len(),
         }
     }
 
@@ -1681,6 +2122,78 @@ impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
     }
 }
 
+unsafe impl<Offset: OffsetType + Send, A: Allocator + Send> Send for BytesTape<Offset, A> {}
+unsafe impl<Offset: OffsetType + Sync, A: Allocator + Sync> Sync for BytesTape<Offset, A> {}
+
+impl<Offset: OffsetType, A: Allocator> fmt::Debug for BytesTape<Offset, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BytesTape")
+            .field("len", &self.len())
+            .field("data_len", &self.data_len())
+            .finish()
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> PartialEq for BytesTape<Offset, A> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        for i in 0..self.len() {
+            if self.get(i) != other.get(i) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Eq for BytesTape<Offset, A> {}
+
+impl<Offset: OffsetType, A: Allocator> Hash for BytesTape<Offset, A> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        for i in 0..self.len() {
+            if let Some(bytes) = self.get(i) {
+                bytes.hash(state);
+            }
+        }
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> PartialOrd for BytesTape<Offset, A> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Ord for BytesTape<Offset, A> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let min_len = self.len().min(other.len());
+        for i in 0..min_len {
+            if let (Some(a), Some(b)) = (self.get(i), other.get(i)) {
+                let ord = a.cmp(b);
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+        self.len().cmp(&other.len())
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator + Clone> Clone for BytesTape<Offset, A> {
+    fn clone(&self) -> Self {
+        let mut cloned = Self::new_in(self.inner.allocator.clone());
+        for i in 0..self.len() {
+            if let Some(bytes) = self.get(i) {
+                let _ = cloned.push(bytes);
+            }
+        }
+        cloned
+    }
+}
+
 impl<Offset: OffsetType, A: Allocator> Index<usize> for BytesTape<Offset, A> {
     type Output = [u8];
 
@@ -1691,27 +2204,51 @@ impl<Offset: OffsetType, A: Allocator> Index<usize> for BytesTape<Offset, A> {
 
 pub struct BytesTapeIter<'a, Offset: OffsetType, A: Allocator> {
     tape: &'a BytesTape<Offset, A>,
-    index: usize,
+    front: usize,
+    back: usize,
 }
 
 impl<'a, Offset: OffsetType, A: Allocator> Iterator for BytesTapeIter<'a, Offset, A> {
     type Item = &'a [u8];
 
     fn next(&mut self) -> Option<Self::Item> {
-        let result = self.tape.get(self.index);
+        if self.front >= self.back {
+            return None;
+        }
+        let result = self.tape.get(self.front);
         if result.is_some() {
-            self.index += 1;
+            self.front += 1;
         }
         result
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.tape.len() - self.index;
+        let remaining = self.back.saturating_sub(self.front);
         (remaining, Some(remaining))
     }
 }
 
+impl<'a, Offset: OffsetType, A: Allocator> DoubleEndedIterator for BytesTapeIter<'a, Offset, A> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front >= self.back {
+            return None;
+        }
+        self.back -= 1;
+        self.tape.get(self.back)
+    }
+}
+
 impl<'a, Offset: OffsetType, A: Allocator> ExactSizeIterator for BytesTapeIter<'a, Offset, A> {}
+
+impl<'a, Offset: OffsetType, A: Allocator> fmt::Debug for BytesTapeIter<'a, Offset, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BytesTapeIter")
+            .field("front", &self.front)
+            .field("back", &self.back)
+            .field("remaining", &self.back.saturating_sub(self.front))
+            .finish()
+    }
+}
 
 impl<'a, Offset: OffsetType, A: Allocator> IntoIterator for &'a BytesTape<Offset, A> {
     type Item = &'a [u8];
@@ -1719,6 +2256,42 @@ impl<'a, Offset: OffsetType, A: Allocator> IntoIterator for &'a BytesTape<Offset
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+impl<'a, Offset: OffsetType, A: Allocator> Extend<&'a [u8]> for BytesTape<Offset, A> {
+    fn extend<I: IntoIterator<Item = &'a [u8]>>(&mut self, iter: I) {
+        for bytes in iter {
+            let _ = self.push(bytes);
+        }
+    }
+}
+
+impl<Offset: OffsetType> Default for BytesTape<Offset, Global> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Offset: OffsetType> FromIterator<Vec<u8>> for BytesTape<Offset, Global> {
+    fn from_iter<I: IntoIterator<Item = Vec<u8>>>(iter: I) -> Self {
+        let mut tape = BytesTape::<Offset, Global>::new();
+        for bytes in iter {
+            tape.push(&bytes)
+                .expect("Failed to build BytesTape from iterator");
+        }
+        tape
+    }
+}
+
+impl<'a, Offset: OffsetType> FromIterator<&'a [u8]> for BytesTape<Offset, Global> {
+    fn from_iter<I: IntoIterator<Item = &'a [u8]>>(iter: I) -> Self {
+        let mut tape = BytesTape::<Offset, Global>::new();
+        for bytes in iter {
+            tape.push(bytes)
+                .expect("Failed to build BytesTape from iterator");
+        }
+        tape
     }
 }
 
@@ -1896,7 +2469,7 @@ struct PackedEntry<Offset, Length> {
 /// assert_eq!(cows.get(3), Some("bar"));
 /// # Ok::<(), StringTapeError>(())
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CharsCows<'a, Offset: OffsetType = u32, Length: LengthType = u16> {
     data: Cow<'a, [u8]>,
     entries: Vec<PackedEntry<Offset, Length>>,
@@ -1905,7 +2478,7 @@ pub struct CharsCows<'a, Offset: OffsetType = u32, Length: LengthType = u16> {
 /// A memory-efficient collection of byte slices with configurable offset and length types.
 ///
 /// Similar to `CharsCows` but for arbitrary binary data without UTF-8 validation.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BytesCows<'a, Offset: OffsetType = u32, Length: LengthType = u16> {
     data: Cow<'a, [u8]>,
     entries: Vec<PackedEntry<Offset, Length>>,
@@ -2366,6 +2939,15 @@ impl<'a, Offset: OffsetType, Length: LengthType> ExactSizeIterator
 {
 }
 
+impl<'a, Offset: OffsetType, Length: LengthType> fmt::Debug for CharsCowsIter<'a, Offset, Length> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CharsCowsIter")
+            .field("index", &self.index)
+            .field("remaining", &(self.slices.len() - self.index))
+            .finish()
+    }
+}
+
 pub struct BytesCowsIter<'a, Offset: OffsetType, Length: LengthType> {
     slices: &'a BytesCows<'a, Offset, Length>,
     index: usize,
@@ -2391,6 +2973,15 @@ impl<'a, Offset: OffsetType, Length: LengthType> Iterator for BytesCowsIter<'a, 
 impl<'a, Offset: OffsetType, Length: LengthType> ExactSizeIterator
     for BytesCowsIter<'a, Offset, Length>
 {
+}
+
+impl<'a, Offset: OffsetType, Length: LengthType> fmt::Debug for BytesCowsIter<'a, Offset, Length> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BytesCowsIter")
+            .field("index", &self.index)
+            .field("remaining", &(self.slices.len() - self.index))
+            .finish()
+    }
 }
 
 impl<'a, Offset: OffsetType, Length: LengthType> Index<usize> for CharsCows<'a, Offset, Length> {
@@ -2428,6 +3019,136 @@ impl<'a, Offset: OffsetType, Length: LengthType> IntoIterator
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+unsafe impl<Offset: OffsetType + Send, Length: LengthType + Send> Send
+    for CharsCows<'_, Offset, Length>
+{
+}
+unsafe impl<Offset: OffsetType + Sync, Length: LengthType + Sync> Sync
+    for CharsCows<'_, Offset, Length>
+{
+}
+
+unsafe impl<Offset: OffsetType + Send, Length: LengthType + Send> Send
+    for BytesCows<'_, Offset, Length>
+{
+}
+unsafe impl<Offset: OffsetType + Sync, Length: LengthType + Sync> Sync
+    for BytesCows<'_, Offset, Length>
+{
+}
+
+impl<'a, Offset: OffsetType, Length: LengthType> fmt::Debug for CharsCows<'a, Offset, Length> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CharsCows")
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+impl<'a, Offset: OffsetType, Length: LengthType> PartialEq for CharsCows<'a, Offset, Length> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        for i in 0..self.len() {
+            if self.get(i) != other.get(i) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl<'a, Offset: OffsetType, Length: LengthType> Eq for CharsCows<'a, Offset, Length> {}
+
+impl<'a, Offset: OffsetType, Length: LengthType> Hash for CharsCows<'a, Offset, Length> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        for i in 0..self.len() {
+            if let Some(s) = self.get(i) {
+                s.hash(state);
+            }
+        }
+    }
+}
+
+impl<'a, Offset: OffsetType, Length: LengthType> PartialOrd for CharsCows<'a, Offset, Length> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a, Offset: OffsetType, Length: LengthType> Ord for CharsCows<'a, Offset, Length> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let min_len = self.len().min(other.len());
+        for i in 0..min_len {
+            if let (Some(a), Some(b)) = (self.get(i), other.get(i)) {
+                let ord = a.cmp(b);
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+        self.len().cmp(&other.len())
+    }
+}
+
+impl<'a, Offset: OffsetType, Length: LengthType> fmt::Debug for BytesCows<'a, Offset, Length> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BytesCows")
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+impl<'a, Offset: OffsetType, Length: LengthType> PartialEq for BytesCows<'a, Offset, Length> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        for i in 0..self.len() {
+            if self.get(i) != other.get(i) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl<'a, Offset: OffsetType, Length: LengthType> Eq for BytesCows<'a, Offset, Length> {}
+
+impl<'a, Offset: OffsetType, Length: LengthType> Hash for BytesCows<'a, Offset, Length> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        for i in 0..self.len() {
+            if let Some(bytes) = self.get(i) {
+                bytes.hash(state);
+            }
+        }
+    }
+}
+
+impl<'a, Offset: OffsetType, Length: LengthType> PartialOrd for BytesCows<'a, Offset, Length> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a, Offset: OffsetType, Length: LengthType> Ord for BytesCows<'a, Offset, Length> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let min_len = self.len().min(other.len());
+        for i in 0..min_len {
+            if let (Some(a), Some(b)) = (self.get(i), other.get(i)) {
+                let ord = a.cmp(b);
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+        self.len().cmp(&other.len())
     }
 }
 
@@ -2919,12 +3640,77 @@ impl<'a> Iterator for CharsCowsAutoIter<'a> {
 
 impl<'a> ExactSizeIterator for CharsCowsAutoIter<'a> {}
 
+impl<'a> fmt::Debug for CharsCowsAutoIter<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CharsCowsAutoIter")
+            .field("index", &self.index)
+            .field("remaining", &(self.inner.len() - self.index))
+            .finish()
+    }
+}
+
 impl<'a> IntoIterator for &'a CharsCowsAuto<'a> {
     type Item = &'a str;
     type IntoIter = CharsCowsAutoIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+impl<'a> fmt::Debug for CharsCowsAuto<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CharsCowsAuto")
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+impl<'a> PartialEq for CharsCowsAuto<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        for i in 0..self.len() {
+            if self.get(i) != other.get(i) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl<'a> Eq for CharsCowsAuto<'a> {}
+
+impl<'a> Hash for CharsCowsAuto<'a> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        for i in 0..self.len() {
+            if let Some(s) = self.get(i) {
+                s.hash(state);
+            }
+        }
+    }
+}
+
+impl<'a> PartialOrd for CharsCowsAuto<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a> Ord for CharsCowsAuto<'a> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let min_len = self.len().min(other.len());
+        for i in 0..min_len {
+            if let (Some(a), Some(b)) = (self.get(i), other.get(i)) {
+                let ord = a.cmp(b);
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+        self.len().cmp(&other.len())
     }
 }
 
@@ -3154,12 +3940,77 @@ impl<'a> Iterator for BytesCowsAutoIter<'a> {
 
 impl<'a> ExactSizeIterator for BytesCowsAutoIter<'a> {}
 
+impl<'a> fmt::Debug for BytesCowsAutoIter<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BytesCowsAutoIter")
+            .field("index", &self.index)
+            .field("remaining", &(self.inner.len() - self.index))
+            .finish()
+    }
+}
+
 impl<'a> IntoIterator for &'a BytesCowsAuto<'a> {
     type Item = &'a [u8];
     type IntoIter = BytesCowsAutoIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+impl<'a> fmt::Debug for BytesCowsAuto<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BytesCowsAuto")
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+impl<'a> PartialEq for BytesCowsAuto<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        for i in 0..self.len() {
+            if self.get(i) != other.get(i) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl<'a> Eq for BytesCowsAuto<'a> {}
+
+impl<'a> Hash for BytesCowsAuto<'a> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        for i in 0..self.len() {
+            if let Some(bytes) = self.get(i) {
+                bytes.hash(state);
+            }
+        }
+    }
+}
+
+impl<'a> PartialOrd for BytesCowsAuto<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a> Ord for BytesCowsAuto<'a> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let min_len = self.len().min(other.len());
+        for i in 0..min_len {
+            if let (Some(a), Some(b)) = (self.get(i), other.get(i)) {
+                let ord = a.cmp(b);
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+        self.len().cmp(&other.len())
     }
 }
 
@@ -3212,6 +4063,72 @@ impl<A: Allocator> CharsTapeAuto<A> {
 impl Default for CharsTapeAuto<Global> {
     fn default() -> Self {
         Self::new_in(Global)
+    }
+}
+
+impl<A: Allocator> fmt::Debug for CharsTapeAuto<A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CharsTapeAuto")
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+impl<A: Allocator> PartialEq for CharsTapeAuto<A> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        for i in 0..self.len() {
+            if self.get(i) != other.get(i) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl<A: Allocator> Eq for CharsTapeAuto<A> {}
+
+impl<A: Allocator> Hash for CharsTapeAuto<A> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        for i in 0..self.len() {
+            if let Some(s) = self.get(i) {
+                s.hash(state);
+            }
+        }
+    }
+}
+
+impl<A: Allocator> PartialOrd for CharsTapeAuto<A> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<A: Allocator> Ord for CharsTapeAuto<A> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let min_len = self.len().min(other.len());
+        for i in 0..min_len {
+            if let (Some(a), Some(b)) = (self.get(i), other.get(i)) {
+                let ord = a.cmp(b);
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+        self.len().cmp(&other.len())
+    }
+}
+
+impl<A: Allocator + Clone> Clone for CharsTapeAuto<A> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::I32(t) => Self::I32(t.clone()),
+            Self::U32(t) => Self::U32(t.clone()),
+            Self::U64(t) => Self::U64(t.clone()),
+        }
     }
 }
 
@@ -3308,6 +4225,72 @@ impl<A: Allocator> BytesTapeAuto<A> {
 impl Default for BytesTapeAuto<Global> {
     fn default() -> Self {
         Self::new_in(Global)
+    }
+}
+
+impl<A: Allocator> fmt::Debug for BytesTapeAuto<A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BytesTapeAuto")
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+impl<A: Allocator> PartialEq for BytesTapeAuto<A> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        for i in 0..self.len() {
+            if self.get(i) != other.get(i) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl<A: Allocator> Eq for BytesTapeAuto<A> {}
+
+impl<A: Allocator> Hash for BytesTapeAuto<A> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        for i in 0..self.len() {
+            if let Some(bytes) = self.get(i) {
+                bytes.hash(state);
+            }
+        }
+    }
+}
+
+impl<A: Allocator> PartialOrd for BytesTapeAuto<A> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<A: Allocator> Ord for BytesTapeAuto<A> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let min_len = self.len().min(other.len());
+        for i in 0..min_len {
+            if let (Some(a), Some(b)) = (self.get(i), other.get(i)) {
+                let ord = a.cmp(b);
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+        self.len().cmp(&other.len())
+    }
+}
+
+impl<A: Allocator + Clone> Clone for BytesTapeAuto<A> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::U16(t) => Self::U16(t.clone()),
+            Self::U32(t) => Self::U32(t.clone()),
+            Self::U64(t) => Self::U64(t.clone()),
+        }
     }
 }
 

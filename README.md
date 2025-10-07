@@ -84,6 +84,18 @@ Data buffer:    [h,e,l,l,o,w,o,r,l,d]
 Offset buffer:  [0, 5, 10]
 ```
 
+`CharsCows` and `BytesCows` use packed `(offset, length)` entries to reference substrings in shared data:
+
+```text
+Shared data:    [h,e,l,l,o, ,w,o,r,l,d, ,f,o,o]
+Entries:        [(0, 5), (6, 5), (12, 3)]  // "hello", "world", "foo"
+```
+
+The `#[repr(C, packed(1))]` layout eliminates padding between offset and length fields.
+Similar to [SoA vs AoS](https://en.wikipedia.org/wiki/AoS_and_SoA), there is a trade-off.
+That said, in extremely high-throughput applications, like hashing billions of very short strings, the runtime may be dominated by unaligned memory accesses and the additional level of indirection.
+Consider switching to `CharsTape` or `BytesTape` in such cases.
+
 ## API Overview
 
 ### Basic Operations
@@ -96,17 +108,28 @@ tape.push("hello")?;                    // Append one string
 tape.extend(["world", "foo"])?;         // Append an array
 assert_eq!(&tape[0], "hello");          // Direct indexing
 assert_eq!(tape.get(1), Some("world")); // Safe access
+assert!(tape.contains("hello"));        // Membership test
 
-for s in &tape { // Iterate
+for s in &tape {                        // Forward iteration
+    println!("{}", s);
+}
+for s in tape.iter().rev() {            // Reverse iteration
     println!("{}", s);
 }
 
 // Construct from iterator
 let tape2: CharsTapeI32 = ["a", "b", "c"].into_iter().collect();
 
-// Sort in-place
+// Sort & compare in-place
 tape.sort();
 tape.sort_by(|a, b| a.len().cmp(&b.len()));
+assert!(tape < tape2);                  // Lexicographic comparison
+
+// Utility methods
+tape.first();                           // First element
+tape.last();                            // Last element
+tape.pop();                             // Remove last
+tape.shrink_to_fit()?;                  // Reduce memory usage
 ```
 
 `BytesTape` and `CharsCowsAuto`/`BytesCowsAuto` provide the same interface.
@@ -184,6 +207,30 @@ Available: `CharsTapeAuto`, `BytesTapeAuto`, `CharsCowsAuto`, `BytesCowsAuto`.
 
 Unsigned offsets (`u32`/`u64`) are available via `CharsTapeU32`, `CharsTapeU64`, `BytesTapeU16`, `BytesTapeU32`, `BytesTapeU64` and corresponding views.
 These cannot be converted to/from Arrow arrays.
+
+### Standard Traits
+
+All tape and view types implement standard Rust traits: `Debug`, `Clone`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Hash`, `Default`, `FromIterator`, `Extend`, `IntoIterator`, `Iterator`, `ExactSizeIterator`, `DoubleEndedIterator`, `Send`, `Sync`.
+
+```rust
+use std::collections::{HashMap, HashSet};
+
+let mut tape1 = CharsTapeI32::new();
+tape1.push("hello")?;
+
+let mut tape2 = tape1.clone();          // Clone
+assert_eq!(tape1, tape2);               // PartialEq, Eq
+assert!(tape1 <= tape2);                // PartialOrd, Ord
+
+// Use in HashMap/HashSet
+let mut map = HashMap::new();
+map.insert(tape1, 42);                  // Hash
+
+// Reverse iteration
+for s in tape2.iter().rev() {           // DoubleEndedIterator
+    println!("{}", s);
+}
+```
 
 ## `no_std` Support
 
