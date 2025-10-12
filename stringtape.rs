@@ -706,6 +706,29 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
         }
     }
 
+    /// Returns a reference to the item at the given index without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `index < self.len()` and that the tape is not empty.
+    #[inline]
+    pub unsafe fn get_unchecked(&self, index: usize) -> &[u8] {
+        let data_ptr = self.data.unwrap_unchecked();
+        let offsets_ptr = self.offsets.unwrap_unchecked().as_ptr().cast::<Offset>();
+
+        let start_offset = if index == 0 {
+            0
+        } else {
+            ptr::read(offsets_ptr.add(index)).to_usize()
+        };
+        let end_offset = ptr::read(offsets_ptr.add(index + 1)).to_usize();
+
+        slice::from_raw_parts(
+            data_ptr.as_ptr().cast::<u8>().add(start_offset),
+            end_offset - start_offset,
+        )
+    }
+
     /// Returns the number of items in the tape.
     pub fn len(&self) -> usize {
         self.len_items
@@ -1002,6 +1025,18 @@ impl<'a, Offset: OffsetType> RawTapeView<'a, Offset> {
         Some(&self.data[start_offset..end_offset])
     }
 
+    /// Returns a reference to the item at the given index without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `index < self.len()`.
+    #[inline]
+    pub unsafe fn get_unchecked(&self, index: usize) -> &[u8] {
+        let start_offset = self.offsets.get_unchecked(index).to_usize();
+        let end_offset = self.offsets.get_unchecked(index + 1).to_usize();
+        self.data.get_unchecked(start_offset..end_offset)
+    }
+
     /// Returns the number of items in this view.
     pub fn len(&self) -> usize {
         self.offsets.len().saturating_sub(1)
@@ -1155,6 +1190,16 @@ impl<'a, Offset: OffsetType> CharsTapeView<'a, Offset> {
             .map(|b| unsafe { core::str::from_utf8_unchecked(b) })
     }
 
+    /// Returns a reference to the string at the given index without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `index < self.len()`.
+    #[inline]
+    pub unsafe fn get_unchecked(&self, index: usize) -> &str {
+        core::str::from_utf8_unchecked(self.inner.get_unchecked(index))
+    }
+
     /// Returns the number of strings in this view.
     pub fn len(&self) -> usize {
         self.inner.len()
@@ -1211,7 +1256,7 @@ impl<'a, Offset: OffsetType> Iterator for CharsTapeViewIter<'a, Offset> {
         if self.front < self.back {
             let idx = self.front;
             self.front += 1;
-            self.view.get(idx)
+            Some(unsafe { self.view.get_unchecked(idx) })
         } else {
             None
         }
@@ -1229,7 +1274,7 @@ impl<'a, Offset: OffsetType> DoubleEndedIterator for CharsTapeViewIter<'a, Offse
             return None;
         }
         self.back -= 1;
-        self.view.get(self.back)
+        Some(unsafe { self.view.get_unchecked(self.back) })
     }
 }
 
@@ -1348,6 +1393,16 @@ impl<'a, Offset: OffsetType> BytesTapeView<'a, Offset> {
         self.inner.get(index)
     }
 
+    /// Returns a reference to the bytes at the given index without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `index < self.len()`.
+    #[inline]
+    pub unsafe fn get_unchecked(&self, index: usize) -> &[u8] {
+        self.inner.get_unchecked(index)
+    }
+
     /// Returns the number of items in this view.
     pub fn len(&self) -> usize {
         self.inner.len()
@@ -1404,7 +1459,7 @@ impl<'a, Offset: OffsetType> Iterator for BytesTapeViewIter<'a, Offset> {
         if self.front < self.back {
             let idx = self.front;
             self.front += 1;
-            self.view.get(idx)
+            Some(unsafe { self.view.get_unchecked(idx) })
         } else {
             None
         }
@@ -1422,7 +1477,7 @@ impl<'a, Offset: OffsetType> DoubleEndedIterator for BytesTapeViewIter<'a, Offse
             return None;
         }
         self.back -= 1;
-        self.view.get(self.back)
+        Some(unsafe { self.view.get_unchecked(self.back) })
     }
 }
 
@@ -1572,6 +1627,16 @@ impl<Offset: OffsetType, A: Allocator> CharsTape<Offset, A> {
         self.inner
             .get(index)
             .map(|b| unsafe { core::str::from_utf8_unchecked(b) })
+    }
+
+    /// Returns a reference to the string at the given index without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `index < self.len()`.
+    #[inline]
+    pub unsafe fn get_unchecked(&self, index: usize) -> &str {
+        core::str::from_utf8_unchecked(self.inner.get_unchecked(index))
     }
 
     /// Returns the number of strings in the CharsTape.
@@ -1832,7 +1897,7 @@ impl<'a, Offset: OffsetType, A: Allocator> Iterator for CharsTapeIter<'a, Offset
         if self.front < self.back {
             let idx = self.front;
             self.front += 1;
-            self.tape.get(idx)
+            Some(unsafe { self.tape.get_unchecked(idx) })
         } else {
             None
         }
@@ -1850,7 +1915,7 @@ impl<'a, Offset: OffsetType, A: Allocator> DoubleEndedIterator for CharsTapeIter
             return None;
         }
         self.back -= 1;
-        self.tape.get(self.back)
+        Some(unsafe { self.tape.get_unchecked(self.back) })
     }
 }
 
@@ -1915,9 +1980,9 @@ impl<'a, Offset: OffsetType, A: Allocator> Extend<&'a str> for CharsTape<Offset,
     }
 }
 
-// ======================
+// ========================
 // BytesTape (bytes view)
-// ======================
+// ========================
 
 impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
     /// Creates a new, empty BytesTape with the global allocator.
@@ -1967,6 +2032,16 @@ impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
     /// Returns a reference to the bytes at the given index, or `None` if out of bounds.
     pub fn get(&self, index: usize) -> Option<&[u8]> {
         self.inner.get(index)
+    }
+
+    /// Returns a reference to the bytes at the given index without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `index < self.len()`.
+    #[inline]
+    pub unsafe fn get_unchecked(&self, index: usize) -> &[u8] {
+        self.inner.get_unchecked(index)
     }
 
     /// Returns the number of items in the tape.
@@ -2223,7 +2298,7 @@ impl<'a, Offset: OffsetType, A: Allocator> Iterator for BytesTapeIter<'a, Offset
         if self.front < self.back {
             let idx = self.front;
             self.front += 1;
-            self.tape.get(idx)
+            Some(unsafe { self.tape.get_unchecked(idx) })
         } else {
             None
         }
@@ -2241,7 +2316,7 @@ impl<'a, Offset: OffsetType, A: Allocator> DoubleEndedIterator for BytesTapeIter
             return None;
         }
         self.back -= 1;
-        self.tape.get(self.back)
+        Some(unsafe { self.tape.get_unchecked(self.back) })
     }
 }
 
@@ -2571,6 +2646,20 @@ impl<'a, Offset: OffsetType, Length: LengthType> CharsCows<'a, Offset, Length> {
         })
     }
 
+    /// Returns a reference to the string at the given index without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `index < self.len()`.
+    #[inline]
+    pub unsafe fn get_unchecked(&self, index: usize) -> &str {
+        let entry = self.entries.get_unchecked(index);
+        let start = entry.offset.to_usize();
+        let len = entry.length.to_usize();
+        // Safety: UTF-8 validated during construction
+        core::str::from_utf8_unchecked(self.data.get_unchecked(start..start + len))
+    }
+
     /// Returns the number of slices in the collection.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -2835,6 +2924,19 @@ impl<'a, Offset: OffsetType, Length: LengthType> BytesCows<'a, Offset, Length> {
         })
     }
 
+    /// Returns a reference to the bytes at the given index without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `index < self.len()`.
+    #[inline]
+    pub unsafe fn get_unchecked(&self, index: usize) -> &[u8] {
+        let entry = self.entries.get_unchecked(index);
+        let start = entry.offset.to_usize();
+        let len = entry.length.to_usize();
+        self.data.get_unchecked(start..start + len)
+    }
+
     /// Returns the number of slices in the collection.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -2937,7 +3039,7 @@ impl<'a, Offset: OffsetType, Length: LengthType> Iterator for CharsCowsIter<'a, 
         if self.front < self.back {
             let idx = self.front;
             self.front += 1;
-            self.slices.get(idx)
+            Some(unsafe { self.slices.get_unchecked(idx) })
         } else {
             None
         }
@@ -2957,7 +3059,7 @@ impl<'a, Offset: OffsetType, Length: LengthType> DoubleEndedIterator
             return None;
         }
         self.back -= 1;
-        self.slices.get(self.back)
+        Some(unsafe { self.slices.get_unchecked(self.back) })
     }
 }
 
@@ -2995,7 +3097,7 @@ impl<'a, Offset: OffsetType, Length: LengthType> Iterator for BytesCowsIter<'a, 
         if self.front < self.back {
             let idx = self.front;
             self.front += 1;
-            self.slices.get(idx)
+            Some(unsafe { self.slices.get_unchecked(idx) })
         } else {
             None
         }
@@ -3015,7 +3117,7 @@ impl<'a, Offset: OffsetType, Length: LengthType> DoubleEndedIterator
             return None;
         }
         self.back -= 1;
-        self.slices.get(self.back)
+        Some(unsafe { self.slices.get_unchecked(self.back) })
     }
 }
 
@@ -3416,6 +3518,23 @@ impl<'a> CharsCowsAuto<'a> {
         }
     }
 
+    /// Returns a reference to the string at the given index without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `index < self.len()`.
+    #[inline]
+    pub unsafe fn get_unchecked(&self, index: usize) -> &str {
+        match self {
+            Self::U32U8(s) => s.get_unchecked(index),
+            Self::U32U16(s) => s.get_unchecked(index),
+            Self::U32U32(s) => s.get_unchecked(index),
+            Self::U64U8(s) => s.get_unchecked(index),
+            Self::U64U16(s) => s.get_unchecked(index),
+            Self::U64U32(s) => s.get_unchecked(index),
+        }
+    }
+
     /// Returns the byte size per entry for the selected type combination.
     pub fn bytes_per_entry(&self) -> usize {
         match self {
@@ -3686,7 +3805,7 @@ impl<'a> Iterator for CharsCowsAutoIter<'a> {
         if self.front < self.back {
             let idx = self.front;
             self.front += 1;
-            self.inner.get(idx)
+            Some(unsafe { self.inner.get_unchecked(idx) })
         } else {
             None
         }
@@ -3704,7 +3823,7 @@ impl<'a> DoubleEndedIterator for CharsCowsAutoIter<'a> {
             return None;
         }
         self.back -= 1;
-        self.inner.get(self.back)
+        Some(unsafe { self.inner.get_unchecked(self.back) })
     }
 }
 
@@ -3867,6 +3986,23 @@ impl<'a> BytesCowsAuto<'a> {
         }
     }
 
+    /// Returns a reference to the bytes at the given index without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `index < self.len()`.
+    #[inline]
+    pub unsafe fn get_unchecked(&self, index: usize) -> &[u8] {
+        match self {
+            Self::U32U8(s) => s.get_unchecked(index),
+            Self::U32U16(s) => s.get_unchecked(index),
+            Self::U32U32(s) => s.get_unchecked(index),
+            Self::U64U8(s) => s.get_unchecked(index),
+            Self::U64U16(s) => s.get_unchecked(index),
+            Self::U64U32(s) => s.get_unchecked(index),
+        }
+    }
+
     /// Returns a zero-copy view of this `BytesCowsAuto` as a `CharsCowsAuto` if all slices are valid UTF-8.
     ///
     /// This validates that all byte slices contain valid UTF-8, then reinterprets the collection
@@ -4004,7 +4140,7 @@ impl<'a> Iterator for BytesCowsAutoIter<'a> {
         if self.front < self.back {
             let idx = self.front;
             self.front += 1;
-            self.inner.get(idx)
+            Some(unsafe { self.inner.get_unchecked(idx) })
         } else {
             None
         }
@@ -4022,7 +4158,7 @@ impl<'a> DoubleEndedIterator for BytesCowsAutoIter<'a> {
             return None;
         }
         self.back -= 1;
-        self.inner.get(self.back)
+        Some(unsafe { self.inner.get_unchecked(self.back) })
     }
 }
 
