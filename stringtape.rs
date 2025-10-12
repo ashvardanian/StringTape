@@ -88,6 +88,7 @@ extern crate alloc;
 use core::cmp::Ordering;
 use core::fmt;
 use core::hash::{Hash, Hasher};
+use core::iter::FusedIterator;
 use core::marker::PhantomData;
 use core::ops::{
     Index, Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive, Sub,
@@ -1196,6 +1197,7 @@ impl<'a, Offset: OffsetType> CharsTapeView<'a, Offset> {
 }
 
 /// Iterator over CharsTapeView strings.
+#[derive(Clone, Copy)]
 pub struct CharsTapeViewIter<'a, Offset: OffsetType> {
     view: &'a CharsTapeView<'a, Offset>,
     front: usize,
@@ -1206,14 +1208,13 @@ impl<'a, Offset: OffsetType> Iterator for CharsTapeViewIter<'a, Offset> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.front >= self.back {
-            return None;
-        }
-        let result = self.view.get(self.front);
-        if result.is_some() {
+        if self.front < self.back {
+            let idx = self.front;
             self.front += 1;
+            self.view.get(idx)
+        } else {
+            None
         }
-        result
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -1233,6 +1234,8 @@ impl<'a, Offset: OffsetType> DoubleEndedIterator for CharsTapeViewIter<'a, Offse
 }
 
 impl<'a, Offset: OffsetType> ExactSizeIterator for CharsTapeViewIter<'a, Offset> {}
+
+impl<'a, Offset: OffsetType> FusedIterator for CharsTapeViewIter<'a, Offset> {}
 
 impl<'a, Offset: OffsetType> fmt::Debug for CharsTapeViewIter<'a, Offset> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1387,6 +1390,7 @@ impl<'a, Offset: OffsetType> BytesTapeView<'a, Offset> {
 }
 
 /// Iterator over BytesTapeView byte slices.
+#[derive(Clone, Copy)]
 pub struct BytesTapeViewIter<'a, Offset: OffsetType> {
     view: &'a BytesTapeView<'a, Offset>,
     front: usize,
@@ -1397,14 +1401,13 @@ impl<'a, Offset: OffsetType> Iterator for BytesTapeViewIter<'a, Offset> {
     type Item = &'a [u8];
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.front >= self.back {
-            return None;
-        }
-        let result = self.view.get(self.front);
-        if result.is_some() {
+        if self.front < self.back {
+            let idx = self.front;
             self.front += 1;
+            self.view.get(idx)
+        } else {
+            None
         }
-        result
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -1424,6 +1427,8 @@ impl<'a, Offset: OffsetType> DoubleEndedIterator for BytesTapeViewIter<'a, Offse
 }
 
 impl<'a, Offset: OffsetType> ExactSizeIterator for BytesTapeViewIter<'a, Offset> {}
+
+impl<'a, Offset: OffsetType> FusedIterator for BytesTapeViewIter<'a, Offset> {}
 
 impl<'a, Offset: OffsetType> fmt::Debug for BytesTapeViewIter<'a, Offset> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1813,6 +1818,7 @@ impl<Offset: OffsetType, A: Allocator + Clone> Clone for CharsTape<Offset, A> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct CharsTapeIter<'a, Offset: OffsetType, A: Allocator> {
     tape: &'a CharsTape<Offset, A>,
     front: usize,
@@ -1823,14 +1829,13 @@ impl<'a, Offset: OffsetType, A: Allocator> Iterator for CharsTapeIter<'a, Offset
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.front >= self.back {
-            return None;
-        }
-        let result = self.tape.get(self.front);
-        if result.is_some() {
+        if self.front < self.back {
+            let idx = self.front;
             self.front += 1;
+            self.tape.get(idx)
+        } else {
+            None
         }
-        result
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -1850,6 +1855,8 @@ impl<'a, Offset: OffsetType, A: Allocator> DoubleEndedIterator for CharsTapeIter
 }
 
 impl<'a, Offset: OffsetType, A: Allocator> ExactSizeIterator for CharsTapeIter<'a, Offset, A> {}
+
+impl<'a, Offset: OffsetType, A: Allocator> FusedIterator for CharsTapeIter<'a, Offset, A> {}
 
 impl<'a, Offset: OffsetType, A: Allocator> fmt::Debug for CharsTapeIter<'a, Offset, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -2202,6 +2209,7 @@ impl<Offset: OffsetType, A: Allocator> Index<usize> for BytesTape<Offset, A> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct BytesTapeIter<'a, Offset: OffsetType, A: Allocator> {
     tape: &'a BytesTape<Offset, A>,
     front: usize,
@@ -2212,14 +2220,13 @@ impl<'a, Offset: OffsetType, A: Allocator> Iterator for BytesTapeIter<'a, Offset
     type Item = &'a [u8];
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.front >= self.back {
-            return None;
-        }
-        let result = self.tape.get(self.front);
-        if result.is_some() {
+        if self.front < self.back {
+            let idx = self.front;
             self.front += 1;
+            self.tape.get(idx)
+        } else {
+            None
         }
-        result
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -2239,6 +2246,8 @@ impl<'a, Offset: OffsetType, A: Allocator> DoubleEndedIterator for BytesTapeIter
 }
 
 impl<'a, Offset: OffsetType, A: Allocator> ExactSizeIterator for BytesTapeIter<'a, Offset, A> {}
+
+impl<'a, Offset: OffsetType, A: Allocator> FusedIterator for BytesTapeIter<'a, Offset, A> {}
 
 impl<'a, Offset: OffsetType, A: Allocator> fmt::Debug for BytesTapeIter<'a, Offset, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -2576,7 +2585,8 @@ impl<'a, Offset: OffsetType, Length: LengthType> CharsCows<'a, Offset, Length> {
     pub fn iter(&self) -> CharsCowsIter<'_, Offset, Length> {
         CharsCowsIter {
             slices: self,
-            index: 0,
+            front: 0,
+            back: self.len(),
         }
     }
 
@@ -2839,7 +2849,8 @@ impl<'a, Offset: OffsetType, Length: LengthType> BytesCows<'a, Offset, Length> {
     pub fn iter(&self) -> BytesCowsIter<'_, Offset, Length> {
         BytesCowsIter {
             slices: self,
-            index: 0,
+            front: 0,
+            back: self.len(),
         }
     }
 
@@ -2912,25 +2923,41 @@ impl<'a, Offset: OffsetType, Length: LengthType> BytesCows<'a, Offset, Length> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct CharsCowsIter<'a, Offset: OffsetType, Length: LengthType> {
     slices: &'a CharsCows<'a, Offset, Length>,
-    index: usize,
+    front: usize,
+    back: usize,
 }
 
 impl<'a, Offset: OffsetType, Length: LengthType> Iterator for CharsCowsIter<'a, Offset, Length> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let result = self.slices.get(self.index);
-        if result.is_some() {
-            self.index += 1;
+        if self.front < self.back {
+            let idx = self.front;
+            self.front += 1;
+            self.slices.get(idx)
+        } else {
+            None
         }
-        result
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.slices.len() - self.index;
+        let remaining = self.back.saturating_sub(self.front);
         (remaining, Some(remaining))
+    }
+}
+
+impl<'a, Offset: OffsetType, Length: LengthType> DoubleEndedIterator
+    for CharsCowsIter<'a, Offset, Length>
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front >= self.back {
+            return None;
+        }
+        self.back -= 1;
+        self.slices.get(self.back)
     }
 }
 
@@ -2939,34 +2966,56 @@ impl<'a, Offset: OffsetType, Length: LengthType> ExactSizeIterator
 {
 }
 
+impl<'a, Offset: OffsetType, Length: LengthType> FusedIterator
+    for CharsCowsIter<'a, Offset, Length>
+{
+}
+
 impl<'a, Offset: OffsetType, Length: LengthType> fmt::Debug for CharsCowsIter<'a, Offset, Length> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CharsCowsIter")
-            .field("index", &self.index)
-            .field("remaining", &(self.slices.len() - self.index))
+            .field("front", &self.front)
+            .field("back", &self.back)
+            .field("remaining", &self.back.saturating_sub(self.front))
             .finish()
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct BytesCowsIter<'a, Offset: OffsetType, Length: LengthType> {
     slices: &'a BytesCows<'a, Offset, Length>,
-    index: usize,
+    front: usize,
+    back: usize,
 }
 
 impl<'a, Offset: OffsetType, Length: LengthType> Iterator for BytesCowsIter<'a, Offset, Length> {
     type Item = &'a [u8];
 
     fn next(&mut self) -> Option<Self::Item> {
-        let result = self.slices.get(self.index);
-        if result.is_some() {
-            self.index += 1;
+        if self.front < self.back {
+            let idx = self.front;
+            self.front += 1;
+            self.slices.get(idx)
+        } else {
+            None
         }
-        result
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.slices.len() - self.index;
+        let remaining = self.back.saturating_sub(self.front);
         (remaining, Some(remaining))
+    }
+}
+
+impl<'a, Offset: OffsetType, Length: LengthType> DoubleEndedIterator
+    for BytesCowsIter<'a, Offset, Length>
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front >= self.back {
+            return None;
+        }
+        self.back -= 1;
+        self.slices.get(self.back)
     }
 }
 
@@ -2975,11 +3024,17 @@ impl<'a, Offset: OffsetType, Length: LengthType> ExactSizeIterator
 {
 }
 
+impl<'a, Offset: OffsetType, Length: LengthType> FusedIterator
+    for BytesCowsIter<'a, Offset, Length>
+{
+}
+
 impl<'a, Offset: OffsetType, Length: LengthType> fmt::Debug for BytesCowsIter<'a, Offset, Length> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BytesCowsIter")
-            .field("index", &self.index)
-            .field("remaining", &(self.slices.len() - self.index))
+            .field("front", &self.front)
+            .field("back", &self.back)
+            .field("remaining", &self.back.saturating_sub(self.front))
             .finish()
     }
 }
@@ -3406,7 +3461,8 @@ impl<'a> CharsCowsAuto<'a> {
     pub fn iter(&self) -> CharsCowsAutoIter<'_> {
         CharsCowsAutoIter {
             inner: self,
-            index: 0,
+            front: 0,
+            back: self.len(),
         }
     }
 
@@ -3616,35 +3672,52 @@ impl<'a> CharsCowsAuto<'a> {
 }
 
 /// Iterator over CharsCowsAuto string cows.
+#[derive(Clone, Copy)]
 pub struct CharsCowsAutoIter<'a> {
     inner: &'a CharsCowsAuto<'a>,
-    index: usize,
+    front: usize,
+    back: usize,
 }
 
 impl<'a> Iterator for CharsCowsAutoIter<'a> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let result = self.inner.get(self.index);
-        if result.is_some() {
-            self.index += 1;
+        if self.front < self.back {
+            let idx = self.front;
+            self.front += 1;
+            self.inner.get(idx)
+        } else {
+            None
         }
-        result
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.inner.len() - self.index;
+        let remaining = self.back.saturating_sub(self.front);
         (remaining, Some(remaining))
+    }
+}
+
+impl<'a> DoubleEndedIterator for CharsCowsAutoIter<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front >= self.back {
+            return None;
+        }
+        self.back -= 1;
+        self.inner.get(self.back)
     }
 }
 
 impl<'a> ExactSizeIterator for CharsCowsAutoIter<'a> {}
 
+impl<'a> FusedIterator for CharsCowsAutoIter<'a> {}
+
 impl<'a> fmt::Debug for CharsCowsAutoIter<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CharsCowsAutoIter")
-            .field("index", &self.index)
-            .field("remaining", &(self.inner.len() - self.index))
+            .field("front", &self.front)
+            .field("back", &self.back)
+            .field("remaining", &self.back.saturating_sub(self.front))
             .finish()
     }
 }
@@ -3910,41 +3983,59 @@ impl<'a> BytesCowsAuto<'a> {
     pub fn iter(&self) -> BytesCowsAutoIter<'_> {
         BytesCowsAutoIter {
             inner: self,
-            index: 0,
+            front: 0,
+            back: self.len(),
         }
     }
 }
 
 /// Iterator over BytesCowsAuto byte cows.
+#[derive(Clone, Copy)]
 pub struct BytesCowsAutoIter<'a> {
     inner: &'a BytesCowsAuto<'a>,
-    index: usize,
+    front: usize,
+    back: usize,
 }
 
 impl<'a> Iterator for BytesCowsAutoIter<'a> {
     type Item = &'a [u8];
 
     fn next(&mut self) -> Option<Self::Item> {
-        let result = self.inner.get(self.index);
-        if result.is_some() {
-            self.index += 1;
+        if self.front < self.back {
+            let idx = self.front;
+            self.front += 1;
+            self.inner.get(idx)
+        } else {
+            None
         }
-        result
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.inner.len() - self.index;
+        let remaining = self.back.saturating_sub(self.front);
         (remaining, Some(remaining))
+    }
+}
+
+impl<'a> DoubleEndedIterator for BytesCowsAutoIter<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front >= self.back {
+            return None;
+        }
+        self.back -= 1;
+        self.inner.get(self.back)
     }
 }
 
 impl<'a> ExactSizeIterator for BytesCowsAutoIter<'a> {}
 
+impl<'a> FusedIterator for BytesCowsAutoIter<'a> {}
+
 impl<'a> fmt::Debug for BytesCowsAutoIter<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BytesCowsAutoIter")
-            .field("index", &self.index)
-            .field("remaining", &(self.inner.len() - self.index))
+            .field("front", &self.front)
+            .field("back", &self.back)
+            .field("remaining", &self.back.saturating_sub(self.front))
             .finish()
     }
 }
