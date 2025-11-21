@@ -3467,7 +3467,7 @@ impl<'a> CharsCowsAuto<'a> {
             .unwrap_or(0);
 
         // Pick smallest offset type
-        let needs_u64_offset = data_len > u32::MAX as usize;
+        let needs_u64_offset = data_len > u32::MAX as usize || max_word_len > u32::MAX as usize;
 
         // Second pass: build with optimal types
         if max_word_len <= u8::MAX as usize {
@@ -3938,7 +3938,7 @@ impl<'a> BytesCowsAuto<'a> {
             .max()
             .unwrap_or(0);
 
-        let needs_u64_offset = data_len > u32::MAX as usize;
+        let needs_u64_offset = data_len > u32::MAX as usize || max_len > u32::MAX as usize;
 
         // Second pass: build with optimal types
         if max_len <= u8::MAX as usize {
