@@ -1,6 +1,6 @@
 [package]
 name = "stringtape"
-version = "2.4.1"
+version = "2.4.2"
 edition = "2021"
 authors = ["Ash Vardanian <1983160+ashvardanian@users.noreply.github.com>"]
 description = "A tape class for strings arrays compatible with Apache Arrow"
