@@ -5,19 +5,24 @@ edition = "2021"
 authors = ["Ash Vardanian <1983160+ashvardanian@users.noreply.github.com>"]
 description = "A tape class for strings arrays compatible with Apache Arrow"
 license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/ashvardanian/StringTape"
+documentation = "https://docs.rs/stringtape"
+homepage = "https://github.com/ashvardanian/StringTape"
 keywords = ["arrow", "strings", "no-std", "tape", "storage"]
 categories = ["data-structures", "no-std"]
+exclude = [".github/", ".vscode/"]
 
 [lib]
 path = "stringtape.rs"
 
 [dependencies]
-allocator-api2 = { version = "0.4", default-features = false, features = [
+allocator-api2 = { version = "0.4.0", default-features = false, features = [
     "alloc",
 ] }
 
 [dev-dependencies]
-arrow = { version = "59", default-features = false }
+arrow = { version = "59.1.0", default-features = false }
 
 [features]
 default = ["std"]
