@@ -1,4 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+#![doc = include_str!("README.md")]
 
 //! # StringTape
 //!
@@ -379,6 +380,38 @@ impl LengthType for u64 {
     fn to_usize(self) -> usize {
         self as usize
     }
+}
+
+/// Reordering shared by every cows collection.
+///
+/// Implemented by `CharsCows`, `BytesCows` and their `Auto` wrappers. Every operation
+/// moves only the compact `(offset, length)` entries, never the payload.
+///
+/// The trait is what keeps the four types in step: a method added to one of them and
+/// forgotten on another fails to compile rather than going unnoticed.
+pub trait Reorderable {
+    /// The element type yielded by the collection: `str` or `[u8]`.
+    type Item: ?Sized + Ord;
+
+    /// Sorts the elements in-place, in their natural order.
+    fn sort(&mut self);
+
+    /// Sorts the elements in-place, without preserving the order of equal elements.
+    fn sort_unstable(&mut self);
+
+    /// Sorts the elements in-place with a comparison function.
+    fn sort_by<F>(&mut self, compare: F)
+    where
+        F: FnMut(&Self::Item, &Self::Item) -> core::cmp::Ordering;
+
+    /// Sorts the elements in-place by a key extracted from each one.
+    fn sort_by_key<K, F>(&mut self, key_of: F)
+    where
+        F: FnMut(&Self::Item) -> K,
+        K: Ord;
+
+    /// Reorders the elements to match `order`, a permutation of `0..len()`.
+    fn permute(&mut self, order: &[usize]) -> Result<(), StringTapeError>;
 }
 
 impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
@@ -3579,6 +3612,68 @@ impl<'a, Offset: OffsetType, Length: LengthType> fmt::Debug for BytesCowsIter<'a
     }
 }
 
+impl<'a, Offset: OffsetType, Length: LengthType> Reorderable for CharsCows<'a, Offset, Length> {
+    type Item = str;
+
+    fn sort(&mut self) {
+        CharsCows::sort(self)
+    }
+
+    fn sort_unstable(&mut self) {
+        CharsCows::sort_unstable(self)
+    }
+
+    fn sort_by<F>(&mut self, compare: F)
+    where
+        F: FnMut(&str, &str) -> core::cmp::Ordering,
+    {
+        CharsCows::sort_by(self, compare)
+    }
+
+    fn sort_by_key<K, F>(&mut self, key_of: F)
+    where
+        F: FnMut(&str) -> K,
+        K: Ord,
+    {
+        CharsCows::sort_by_key(self, key_of)
+    }
+
+    fn permute(&mut self, order: &[usize]) -> Result<(), StringTapeError> {
+        CharsCows::permute(self, order)
+    }
+}
+
+impl<'a, Offset: OffsetType, Length: LengthType> Reorderable for BytesCows<'a, Offset, Length> {
+    type Item = [u8];
+
+    fn sort(&mut self) {
+        BytesCows::sort(self)
+    }
+
+    fn sort_unstable(&mut self) {
+        BytesCows::sort_unstable(self)
+    }
+
+    fn sort_by<F>(&mut self, compare: F)
+    where
+        F: FnMut(&[u8], &[u8]) -> core::cmp::Ordering,
+    {
+        BytesCows::sort_by(self, compare)
+    }
+
+    fn sort_by_key<K, F>(&mut self, key_of: F)
+    where
+        F: FnMut(&[u8]) -> K,
+        K: Ord,
+    {
+        BytesCows::sort_by_key(self, key_of)
+    }
+
+    fn permute(&mut self, order: &[usize]) -> Result<(), StringTapeError> {
+        BytesCows::permute(self, order)
+    }
+}
+
 impl<'a, Offset: OffsetType, Length: LengthType> Index<usize> for CharsCows<'a, Offset, Length> {
     type Output = str;
 
@@ -3841,6 +3936,7 @@ pub type BytesCowsU64U32<'a> = BytesCows<'a, u64, u32>;
 /// Automatically selects the most memory-efficient CharsCows type based on data size.
 ///
 /// Returns an enum that can hold any combination of offset/length types.
+#[derive(Clone)]
 pub enum CharsCowsAuto<'a> {
     U32U8(CharsCows<'a, u32, u8>),
     U32U16(CharsCows<'a, u32, u16>),
@@ -4138,6 +4234,18 @@ impl<'a> CharsCowsAuto<'a> {
         }
     }
 
+    /// Reorders the slices to match `order`, a permutation of `0..len()`.
+    pub fn permute(&mut self, order: &[usize]) -> Result<(), StringTapeError> {
+        match self {
+            Self::U32U8(s) => s.permute(order),
+            Self::U32U16(s) => s.permute(order),
+            Self::U32U32(s) => s.permute(order),
+            Self::U64U8(s) => s.permute(order),
+            Self::U64U16(s) => s.permute(order),
+            Self::U64U32(s) => s.permute(order),
+        }
+    }
+
     /// Returns a reference to the underlying data buffer.
     ///
     /// # Examples
@@ -4349,6 +4457,7 @@ impl<'a> Ord for CharsCowsAuto<'a> {
 // ========================
 
 /// Automatically selects the most memory-efficient BytesCows type based on data size.
+#[derive(Clone)]
 pub enum BytesCowsAuto<'a> {
     U32U8(BytesCows<'a, u32, u8>),
     U32U16(BytesCows<'a, u32, u16>),
@@ -4506,6 +4615,97 @@ impl<'a> BytesCowsAuto<'a> {
         }
     }
 
+    /// Returns the bytes each entry occupies for the selected variant.
+    pub fn bytes_per_entry(&self) -> usize {
+        match self {
+            Self::U32U8(_) => 4 + 1,
+            Self::U32U16(_) => 4 + 2,
+            Self::U32U32(_) => 4 + 4,
+            Self::U64U8(_) => 8 + 1,
+            Self::U64U16(_) => 8 + 2,
+            Self::U64U32(_) => 8 + 4,
+        }
+    }
+
+    /// Returns the name of the selected variant.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::U32U8(_) => "BytesCows<u32, u8>",
+            Self::U32U16(_) => "BytesCows<u32, u16>",
+            Self::U32U32(_) => "BytesCows<u32, u32>",
+            Self::U64U8(_) => "BytesCows<u64, u8>",
+            Self::U64U16(_) => "BytesCows<u64, u16>",
+            Self::U64U32(_) => "BytesCows<u64, u32>",
+        }
+    }
+
+    /// Sorts the slices in-place in byte-lexicographic order.
+    pub fn sort(&mut self) {
+        match self {
+            Self::U32U8(s) => s.sort(),
+            Self::U32U16(s) => s.sort(),
+            Self::U32U32(s) => s.sort(),
+            Self::U64U8(s) => s.sort(),
+            Self::U64U16(s) => s.sort(),
+            Self::U64U32(s) => s.sort(),
+        }
+    }
+
+    /// Sorts the slices in-place using an unstable sorting algorithm.
+    pub fn sort_unstable(&mut self) {
+        match self {
+            Self::U32U8(s) => s.sort_unstable(),
+            Self::U32U16(s) => s.sort_unstable(),
+            Self::U32U32(s) => s.sort_unstable(),
+            Self::U64U8(s) => s.sort_unstable(),
+            Self::U64U16(s) => s.sort_unstable(),
+            Self::U64U32(s) => s.sort_unstable(),
+        }
+    }
+
+    /// Sorts the slices in-place with a custom comparison function.
+    pub fn sort_by<F>(&mut self, compare: F)
+    where
+        F: FnMut(&[u8], &[u8]) -> core::cmp::Ordering,
+    {
+        match self {
+            Self::U32U8(s) => s.sort_by(compare),
+            Self::U32U16(s) => s.sort_by(compare),
+            Self::U32U32(s) => s.sort_by(compare),
+            Self::U64U8(s) => s.sort_by(compare),
+            Self::U64U16(s) => s.sort_by(compare),
+            Self::U64U32(s) => s.sort_by(compare),
+        }
+    }
+
+    /// Sorts the slices in-place by a key extracted from each one.
+    pub fn sort_by_key<K, F>(&mut self, key_of: F)
+    where
+        F: FnMut(&[u8]) -> K,
+        K: Ord,
+    {
+        match self {
+            Self::U32U8(s) => s.sort_by_key(key_of),
+            Self::U32U16(s) => s.sort_by_key(key_of),
+            Self::U32U32(s) => s.sort_by_key(key_of),
+            Self::U64U8(s) => s.sort_by_key(key_of),
+            Self::U64U16(s) => s.sort_by_key(key_of),
+            Self::U64U32(s) => s.sort_by_key(key_of),
+        }
+    }
+
+    /// Reorders the slices to match `order`, a permutation of `0..len()`.
+    pub fn permute(&mut self, order: &[usize]) -> Result<(), StringTapeError> {
+        match self {
+            Self::U32U8(s) => s.permute(order),
+            Self::U32U16(s) => s.permute(order),
+            Self::U32U32(s) => s.permute(order),
+            Self::U64U8(s) => s.permute(order),
+            Self::U64U16(s) => s.permute(order),
+            Self::U64U32(s) => s.permute(order),
+        }
+    }
+
     /// Returns a reference to the parent byte buffer that all slices reference.
     ///
     /// This is an alias for `data()` that provides a consistent API across all Cows types.
@@ -4623,6 +4823,84 @@ impl<'a> IntoIterator for &'a BytesCowsAuto<'a> {
     }
 }
 
+impl<'a> Index<usize> for CharsCowsAuto<'a> {
+    type Output = str;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index).expect("index out of bounds")
+    }
+}
+
+impl<'a> Index<usize> for BytesCowsAuto<'a> {
+    type Output = [u8];
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index).expect("index out of bounds")
+    }
+}
+
+impl<'a> Reorderable for CharsCowsAuto<'a> {
+    type Item = str;
+
+    fn sort(&mut self) {
+        CharsCowsAuto::sort(self)
+    }
+
+    fn sort_unstable(&mut self) {
+        CharsCowsAuto::sort_unstable(self)
+    }
+
+    fn sort_by<F>(&mut self, compare: F)
+    where
+        F: FnMut(&str, &str) -> core::cmp::Ordering,
+    {
+        CharsCowsAuto::sort_by(self, compare)
+    }
+
+    fn sort_by_key<K, F>(&mut self, key_of: F)
+    where
+        F: FnMut(&str) -> K,
+        K: Ord,
+    {
+        CharsCowsAuto::sort_by_key(self, key_of)
+    }
+
+    fn permute(&mut self, order: &[usize]) -> Result<(), StringTapeError> {
+        CharsCowsAuto::permute(self, order)
+    }
+}
+
+impl<'a> Reorderable for BytesCowsAuto<'a> {
+    type Item = [u8];
+
+    fn sort(&mut self) {
+        BytesCowsAuto::sort(self)
+    }
+
+    fn sort_unstable(&mut self) {
+        BytesCowsAuto::sort_unstable(self)
+    }
+
+    fn sort_by<F>(&mut self, compare: F)
+    where
+        F: FnMut(&[u8], &[u8]) -> core::cmp::Ordering,
+    {
+        BytesCowsAuto::sort_by(self, compare)
+    }
+
+    fn sort_by_key<K, F>(&mut self, key_of: F)
+    where
+        F: FnMut(&[u8]) -> K,
+        K: Ord,
+    {
+        BytesCowsAuto::sort_by_key(self, key_of)
+    }
+
+    fn permute(&mut self, order: &[usize]) -> Result<(), StringTapeError> {
+        BytesCowsAuto::permute(self, order)
+    }
+}
+
 impl<'a> fmt::Debug for BytesCowsAuto<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BytesCowsAuto")
@@ -4696,11 +4974,36 @@ impl<A: Allocator> CharsTapeAuto<A> {
         Self::I32(CharsTape::new_in(allocator))
     }
 
+    /// Creates a tape with pre-allocated capacity, using a custom allocator.
+    pub fn with_capacity_in(
+        data_capacity: usize,
+        strings_capacity: usize,
+        allocator: A,
+    ) -> Result<Self, StringTapeError> {
+        Ok(Self::I32(CharsTape::with_capacity_in(
+            data_capacity,
+            strings_capacity,
+            allocator,
+        )?))
+    }
+
     pub fn push(&mut self, s: &str) -> Result<(), StringTapeError> {
         match self {
             Self::I32(t) => t.push(s),
             Self::U32(t) => t.push(s),
             Self::U64(t) => t.push(s),
+        }
+    }
+
+    /// Appends every string an iterator yields.
+    pub fn extend<'a, I>(&mut self, iter: I) -> Result<(), StringTapeError>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        match self {
+            Self::I32(t) => t.extend(iter),
+            Self::U32(t) => t.extend(iter),
+            Self::U64(t) => t.extend(iter),
         }
     }
 
@@ -4722,6 +5025,246 @@ impl<A: Allocator> CharsTapeAuto<A> {
             Self::U32(t) => t.get(index),
             Self::U64(t) => t.get(index),
         }
+    }
+
+    /// Returns the string at `index` without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `index < self.len()`.
+    pub unsafe fn get_unchecked(&self, index: usize) -> &str {
+        match self {
+            Self::I32(t) => t.get_unchecked(index),
+            Self::U32(t) => t.get_unchecked(index),
+            Self::U64(t) => t.get_unchecked(index),
+        }
+    }
+
+    /// Returns the first string, or `None` if empty.
+    pub fn first(&self) -> Option<&str> {
+        self.get(0)
+    }
+
+    /// Returns the last string, or `None` if empty.
+    pub fn last(&self) -> Option<&str> {
+        match self {
+            Self::I32(t) => t.last(),
+            Self::U32(t) => t.last(),
+            Self::U64(t) => t.last(),
+        }
+    }
+
+    /// Removes the last string, or returns `None` if empty.
+    pub fn pop(&mut self) -> Option<()> {
+        match self {
+            Self::I32(t) => t.pop(),
+            Self::U32(t) => t.pop(),
+            Self::U64(t) => t.pop(),
+        }
+    }
+
+    /// Returns true if the tape contains the given string.
+    pub fn contains(&self, item: &str) -> bool {
+        match self {
+            Self::I32(t) => t.contains(item),
+            Self::U32(t) => t.contains(item),
+            Self::U64(t) => t.contains(item),
+        }
+    }
+
+    /// Returns the total number of bytes used by string data.
+    pub fn data_len(&self) -> usize {
+        match self {
+            Self::I32(t) => t.data_len(),
+            Self::U32(t) => t.data_len(),
+            Self::U64(t) => t.data_len(),
+        }
+    }
+
+    /// Returns the number of strings that can be stored without reallocating.
+    pub fn capacity(&self) -> usize {
+        match self {
+            Self::I32(t) => t.capacity(),
+            Self::U32(t) => t.capacity(),
+            Self::U64(t) => t.capacity(),
+        }
+    }
+
+    /// Returns the number of bytes allocated for string data.
+    pub fn data_capacity(&self) -> usize {
+        match self {
+            Self::I32(t) => t.data_capacity(),
+            Self::U32(t) => t.data_capacity(),
+            Self::U64(t) => t.data_capacity(),
+        }
+    }
+
+    /// Returns the number of offset slots allocated.
+    pub fn offsets_capacity(&self) -> usize {
+        match self {
+            Self::I32(t) => t.offsets_capacity(),
+            Self::U32(t) => t.offsets_capacity(),
+            Self::U64(t) => t.offsets_capacity(),
+        }
+    }
+
+    /// Reserves room for more bytes and more strings.
+    pub fn reserve(
+        &mut self,
+        additional_bytes: usize,
+        additional_strings: usize,
+    ) -> Result<(), StringTapeError> {
+        match self {
+            Self::I32(t) => t.reserve(additional_bytes, additional_strings),
+            Self::U32(t) => t.reserve(additional_bytes, additional_strings),
+            Self::U64(t) => t.reserve(additional_bytes, additional_strings),
+        }
+    }
+
+    /// Removes all strings, keeping allocated capacity.
+    pub fn clear(&mut self) {
+        match self {
+            Self::I32(t) => t.clear(),
+            Self::U32(t) => t.clear(),
+            Self::U64(t) => t.clear(),
+        }
+    }
+
+    /// Keeps the first `len` strings and drops the rest.
+    pub fn truncate(&mut self, len: usize) {
+        match self {
+            Self::I32(t) => t.truncate(len),
+            Self::U32(t) => t.truncate(len),
+            Self::U64(t) => t.truncate(len),
+        }
+    }
+
+    /// Releases capacity beyond what is currently used.
+    pub fn shrink_to_fit(&mut self) -> Result<(), StringTapeError> {
+        match self {
+            Self::I32(t) => t.shrink_to_fit(),
+            Self::U32(t) => t.shrink_to_fit(),
+            Self::U64(t) => t.shrink_to_fit(),
+        }
+    }
+
+    /// Returns a slice view of the data buffer.
+    pub fn data_slice(&self) -> &[u8] {
+        match self {
+            Self::I32(t) => t.data_slice(),
+            Self::U32(t) => t.data_slice(),
+            Self::U64(t) => t.data_slice(),
+        }
+    }
+
+    /// Returns a reference to the allocator.
+    pub fn allocator(&self) -> &A {
+        match self {
+            Self::I32(t) => t.allocator(),
+            Self::U32(t) => t.allocator(),
+            Self::U64(t) => t.allocator(),
+        }
+    }
+
+    /// Returns the name of the selected variant.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::I32(_) => "CharsTape<i32>",
+            Self::U32(_) => "CharsTape<u32>",
+            Self::U64(_) => "CharsTape<u64>",
+        }
+    }
+
+    /// Returns an iterator over the strings.
+    pub fn iter(&self) -> CharsTapeAutoIter<'_, A> {
+        CharsTapeAutoIter {
+            tape: self,
+            front: 0,
+            back: self.len(),
+        }
+    }
+}
+
+/// Iterator over the strings of a [`CharsTapeAuto`].
+pub struct CharsTapeAutoIter<'a, A: Allocator> {
+    tape: &'a CharsTapeAuto<A>,
+    front: usize,
+    back: usize,
+}
+
+impl<'a, A: Allocator> Iterator for CharsTapeAutoIter<'a, A> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.front < self.back {
+            let index = self.front;
+            self.front += 1;
+            Some(unsafe { self.tape.get_unchecked(index) })
+        } else {
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.back.saturating_sub(self.front);
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'a, A: Allocator> DoubleEndedIterator for CharsTapeAutoIter<'a, A> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front < self.back {
+            self.back -= 1;
+            Some(unsafe { self.tape.get_unchecked(self.back) })
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a, A: Allocator> ExactSizeIterator for CharsTapeAutoIter<'a, A> {}
+
+impl<'a, A: Allocator> FusedIterator for CharsTapeAutoIter<'a, A> {}
+
+impl<'a, A: Allocator> fmt::Debug for CharsTapeAutoIter<'a, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CharsTapeAutoIter")
+            .field("front", &self.front)
+            .field("back", &self.back)
+            .field("remaining", &self.back.saturating_sub(self.front))
+            .finish()
+    }
+}
+
+impl<'a, A: Allocator> IntoIterator for &'a CharsTapeAuto<A> {
+    type Item = &'a str;
+    type IntoIter = CharsTapeAutoIter<'a, A>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<A: Allocator> Index<usize> for CharsTapeAuto<A> {
+    type Output = str;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index).expect("index out of bounds")
+    }
+}
+
+impl CharsTapeAuto<Global> {
+    /// Creates an empty CharsTapeAuto with the global allocator.
+    pub fn new() -> Self {
+        Self::new_in(Global)
+    }
+
+    /// Creates a tape with pre-allocated capacity, using the global allocator.
+    pub fn with_capacity(
+        data_capacity: usize,
+        strings_capacity: usize,
+    ) -> Result<Self, StringTapeError> {
+        Self::with_capacity_in(data_capacity, strings_capacity, Global)
     }
 }
 
@@ -4858,11 +5401,36 @@ impl<A: Allocator> BytesTapeAuto<A> {
         Self::U16(BytesTape::new_in(allocator))
     }
 
+    /// Creates a tape with pre-allocated capacity, using a custom allocator.
+    pub fn with_capacity_in(
+        data_capacity: usize,
+        items_capacity: usize,
+        allocator: A,
+    ) -> Result<Self, StringTapeError> {
+        Ok(Self::U16(BytesTape::with_capacity_in(
+            data_capacity,
+            items_capacity,
+            allocator,
+        )?))
+    }
+
     pub fn push(&mut self, bytes: &[u8]) -> Result<(), StringTapeError> {
         match self {
             Self::U16(t) => t.push(bytes),
             Self::U32(t) => t.push(bytes),
             Self::U64(t) => t.push(bytes),
+        }
+    }
+
+    /// Appends every item an iterator yields.
+    pub fn extend<'a, I>(&mut self, iter: I) -> Result<(), StringTapeError>
+    where
+        I: IntoIterator<Item = &'a [u8]>,
+    {
+        match self {
+            Self::U16(t) => t.extend(iter),
+            Self::U32(t) => t.extend(iter),
+            Self::U64(t) => t.extend(iter),
         }
     }
 
@@ -4884,6 +5452,258 @@ impl<A: Allocator> BytesTapeAuto<A> {
             Self::U32(t) => t.get(index),
             Self::U64(t) => t.get(index),
         }
+    }
+
+    /// Returns the item at `index` without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `index < self.len()`.
+    pub unsafe fn get_unchecked(&self, index: usize) -> &[u8] {
+        match self {
+            Self::U16(t) => t.get_unchecked(index),
+            Self::U32(t) => t.get_unchecked(index),
+            Self::U64(t) => t.get_unchecked(index),
+        }
+    }
+
+    /// Returns the first item, or `None` if empty.
+    pub fn first(&self) -> Option<&[u8]> {
+        self.get(0)
+    }
+
+    /// Returns the last item, or `None` if empty.
+    pub fn last(&self) -> Option<&[u8]> {
+        match self {
+            Self::U16(t) => t.last(),
+            Self::U32(t) => t.last(),
+            Self::U64(t) => t.last(),
+        }
+    }
+
+    /// Removes the last item, or returns `None` if empty.
+    pub fn pop(&mut self) -> Option<()> {
+        match self {
+            Self::U16(t) => t.pop(),
+            Self::U32(t) => t.pop(),
+            Self::U64(t) => t.pop(),
+        }
+    }
+
+    /// Returns true if the tape contains the given byte slice.
+    pub fn contains(&self, item: &[u8]) -> bool {
+        match self {
+            Self::U16(t) => t.contains(item),
+            Self::U32(t) => t.contains(item),
+            Self::U64(t) => t.contains(item),
+        }
+    }
+
+    /// Returns the total number of bytes used by item data.
+    pub fn data_len(&self) -> usize {
+        match self {
+            Self::U16(t) => t.data_len(),
+            Self::U32(t) => t.data_len(),
+            Self::U64(t) => t.data_len(),
+        }
+    }
+
+    /// Returns the number of items that can be stored without reallocating.
+    pub fn capacity(&self) -> usize {
+        match self {
+            Self::U16(t) => t.capacity(),
+            Self::U32(t) => t.capacity(),
+            Self::U64(t) => t.capacity(),
+        }
+    }
+
+    /// Returns the number of bytes allocated for data.
+    pub fn data_capacity(&self) -> usize {
+        match self {
+            Self::U16(t) => t.data_capacity(),
+            Self::U32(t) => t.data_capacity(),
+            Self::U64(t) => t.data_capacity(),
+        }
+    }
+
+    /// Returns the number of offset slots allocated.
+    pub fn offsets_capacity(&self) -> usize {
+        match self {
+            Self::U16(t) => t.offsets_capacity(),
+            Self::U32(t) => t.offsets_capacity(),
+            Self::U64(t) => t.offsets_capacity(),
+        }
+    }
+
+    /// Reserves room for more bytes and more items.
+    pub fn reserve(
+        &mut self,
+        additional_bytes: usize,
+        additional_items: usize,
+    ) -> Result<(), StringTapeError> {
+        match self {
+            Self::U16(t) => t.reserve(additional_bytes, additional_items),
+            Self::U32(t) => t.reserve(additional_bytes, additional_items),
+            Self::U64(t) => t.reserve(additional_bytes, additional_items),
+        }
+    }
+
+    /// Removes all items, keeping allocated capacity.
+    pub fn clear(&mut self) {
+        match self {
+            Self::U16(t) => t.clear(),
+            Self::U32(t) => t.clear(),
+            Self::U64(t) => t.clear(),
+        }
+    }
+
+    /// Keeps the first `len` items and drops the rest.
+    pub fn truncate(&mut self, len: usize) {
+        match self {
+            Self::U16(t) => t.truncate(len),
+            Self::U32(t) => t.truncate(len),
+            Self::U64(t) => t.truncate(len),
+        }
+    }
+
+    /// Releases capacity beyond what is currently used.
+    pub fn shrink_to_fit(&mut self) -> Result<(), StringTapeError> {
+        match self {
+            Self::U16(t) => t.shrink_to_fit(),
+            Self::U32(t) => t.shrink_to_fit(),
+            Self::U64(t) => t.shrink_to_fit(),
+        }
+    }
+
+    /// Returns a slice view of the data buffer.
+    pub fn data_slice(&self) -> &[u8] {
+        match self {
+            Self::U16(t) => t.data_slice(),
+            Self::U32(t) => t.data_slice(),
+            Self::U64(t) => t.data_slice(),
+        }
+    }
+
+    /// Returns a mutable slice view of the data buffer.
+    ///
+    /// Offsets are untouched, so this suits length-preserving transforms applied across
+    /// the whole tape at once rather than item by item.
+    pub fn data_slice_mut(&mut self) -> &mut [u8] {
+        match self {
+            Self::U16(t) => t.data_slice_mut(),
+            Self::U32(t) => t.data_slice_mut(),
+            Self::U64(t) => t.data_slice_mut(),
+        }
+    }
+
+    /// Returns a reference to the allocator.
+    pub fn allocator(&self) -> &A {
+        match self {
+            Self::U16(t) => t.allocator(),
+            Self::U32(t) => t.allocator(),
+            Self::U64(t) => t.allocator(),
+        }
+    }
+
+    /// Returns the name of the selected variant.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::U16(_) => "BytesTape<u16>",
+            Self::U32(_) => "BytesTape<u32>",
+            Self::U64(_) => "BytesTape<u64>",
+        }
+    }
+
+    /// Returns an iterator over the items.
+    pub fn iter(&self) -> BytesTapeAutoIter<'_, A> {
+        BytesTapeAutoIter {
+            tape: self,
+            front: 0,
+            back: self.len(),
+        }
+    }
+}
+
+/// Iterator over the items of a [`BytesTapeAuto`].
+pub struct BytesTapeAutoIter<'a, A: Allocator> {
+    tape: &'a BytesTapeAuto<A>,
+    front: usize,
+    back: usize,
+}
+
+impl<'a, A: Allocator> Iterator for BytesTapeAutoIter<'a, A> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.front < self.back {
+            let index = self.front;
+            self.front += 1;
+            Some(unsafe { self.tape.get_unchecked(index) })
+        } else {
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.back.saturating_sub(self.front);
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'a, A: Allocator> DoubleEndedIterator for BytesTapeAutoIter<'a, A> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front < self.back {
+            self.back -= 1;
+            Some(unsafe { self.tape.get_unchecked(self.back) })
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a, A: Allocator> ExactSizeIterator for BytesTapeAutoIter<'a, A> {}
+
+impl<'a, A: Allocator> FusedIterator for BytesTapeAutoIter<'a, A> {}
+
+impl<'a, A: Allocator> fmt::Debug for BytesTapeAutoIter<'a, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BytesTapeAutoIter")
+            .field("front", &self.front)
+            .field("back", &self.back)
+            .field("remaining", &self.back.saturating_sub(self.front))
+            .finish()
+    }
+}
+
+impl<'a, A: Allocator> IntoIterator for &'a BytesTapeAuto<A> {
+    type Item = &'a [u8];
+    type IntoIter = BytesTapeAutoIter<'a, A>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<A: Allocator> Index<usize> for BytesTapeAuto<A> {
+    type Output = [u8];
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index).expect("index out of bounds")
+    }
+}
+
+impl BytesTapeAuto<Global> {
+    /// Creates an empty BytesTapeAuto with the global allocator.
+    pub fn new() -> Self {
+        Self::new_in(Global)
+    }
+
+    /// Creates a tape with pre-allocated capacity, using the global allocator.
+    pub fn with_capacity(
+        data_capacity: usize,
+        items_capacity: usize,
+    ) -> Result<Self, StringTapeError> {
+        Self::with_capacity_in(data_capacity, items_capacity, Global)
     }
 }
 
@@ -6155,6 +6975,151 @@ mod tests {
     }
 
     // endregion: BytesCows ordering
+
+    // region: Auto forwarding
+
+    /// The tape wrappers forwarded a handful of methods and dropped the rest; every one
+    /// added here is exercised, since hand-written arms are where omissions hide.
+    #[test]
+    fn chars_tape_auto_forwards_the_tape_surface() {
+        let mut tape = CharsTapeAuto::with_capacity(128, 8).unwrap();
+        tape.extend(["alpha", "beta", "gamma"]).unwrap();
+
+        assert_eq!(tape.len(), 3);
+        assert_eq!(tape.first(), Some("alpha"));
+        assert_eq!(tape.last(), Some("gamma"));
+        assert_eq!(&tape[1], "beta");
+        assert!(tape.contains("beta"));
+        assert_eq!(tape.data_len(), 14);
+        assert!(tape.capacity() >= 8);
+        assert!(tape.data_capacity() >= 128);
+        assert!(tape.offsets_capacity() >= 9);
+        assert_eq!(tape.data_slice(), b"alphabetagamma");
+        assert_eq!(tape.type_name(), "CharsTape<i32>");
+        assert_eq!(unsafe { tape.get_unchecked(2) }, "gamma");
+
+        assert_eq!(
+            tape.iter().collect::<Vec<&str>>(),
+            vec!["alpha", "beta", "gamma"]
+        );
+        assert_eq!(tape.iter().next_back(), Some("gamma"));
+        assert_eq!((&tape).into_iter().count(), 3);
+
+        tape.pop();
+        assert_eq!(tape.len(), 2);
+        tape.truncate(1);
+        assert_eq!(tape.len(), 1);
+        tape.shrink_to_fit().unwrap();
+        tape.clear();
+        assert!(tape.is_empty());
+        tape.reserve(256, 16).unwrap();
+        assert!(tape.data_capacity() >= 256);
+    }
+
+    #[test]
+    fn bytes_tape_auto_forwards_the_tape_surface() {
+        let mut tape = BytesTapeAuto::with_capacity(128, 8).unwrap();
+        tape.extend([&b"acgt"[..], b"tgca"]).unwrap();
+
+        assert_eq!(tape.len(), 2);
+        assert_eq!(tape.first(), Some(&b"acgt"[..]));
+        assert_eq!(tape.last(), Some(&b"tgca"[..]));
+        assert_eq!(&tape[0], b"acgt");
+        assert!(tape.contains(b"tgca"));
+        assert_eq!(tape.data_len(), 8);
+        assert_eq!(tape.type_name(), "BytesTape<u16>");
+        assert_eq!(unsafe { tape.get_unchecked(1) }, b"tgca");
+        assert_eq!(tape.iter().count(), 2);
+
+        for byte in tape.data_slice_mut() {
+            byte.make_ascii_uppercase();
+        }
+        assert_eq!(tape.get(0), Some(&b"ACGT"[..]));
+
+        tape.clear();
+        tape.reserve(256, 16).unwrap();
+        assert!(tape.capacity() >= 16);
+    }
+
+    /// The cows wrappers dropped `Clone` and `Index`, which their base types have.
+    #[test]
+    fn cows_auto_clones_and_indexes() {
+        let data = "alpha beta";
+        let cows =
+            CharsCowsAuto::from_iter_and_data(data.split(' '), Cow::Borrowed(data.as_bytes()))
+                .unwrap();
+        let copy = cows.clone();
+        assert_eq!(&copy[1], "beta");
+
+        let raw = b"alpha beta";
+        let bytes =
+            BytesCowsAuto::from_iter_and_data(raw.split(|&b| b == b' '), Cow::Borrowed(&raw[..]))
+                .unwrap();
+        let bytes_copy = bytes.clone();
+        assert_eq!(&bytes_copy[0], b"alpha");
+    }
+
+    // endregion: Auto forwarding
+
+    // region: Reorderable
+
+    /// Exercises every implementor through the trait, so a type that stops keeping up
+    /// with the others fails to compile rather than going unnoticed.
+    fn reorder_through_trait<C>(collection: &mut C) -> Result<(), StringTapeError>
+    where
+        C: Reorderable,
+    {
+        collection.sort();
+        collection.sort_unstable();
+        collection.sort_by(|first, second| first.cmp(second));
+        collection.sort_by_key(|item| item.cmp(item));
+        collection.permute(&[0])
+    }
+
+    #[test]
+    fn every_cows_type_is_reorderable() {
+        let text = "solo";
+        let bytes = b"solo";
+
+        let mut chars =
+            CharsCows::<u32, u16>::from_iter_and_data([text], Cow::Borrowed(text.as_bytes()))
+                .unwrap();
+        let mut raw =
+            BytesCows::<u32, u16>::from_iter_and_data([&bytes[..]], Cow::Borrowed(&bytes[..]))
+                .unwrap();
+        let mut chars_auto =
+            CharsCowsAuto::from_iter_and_data([text], Cow::Borrowed(text.as_bytes())).unwrap();
+        let mut bytes_auto =
+            BytesCowsAuto::from_iter_and_data([&bytes[..]], Cow::Borrowed(&bytes[..])).unwrap();
+
+        reorder_through_trait(&mut chars).unwrap();
+        reorder_through_trait(&mut raw).unwrap();
+        reorder_through_trait(&mut chars_auto).unwrap();
+        reorder_through_trait(&mut bytes_auto).unwrap();
+
+        assert_eq!(chars.get(0), Some("solo"));
+        assert_eq!(bytes_auto.get(0), Some(&b"solo"[..]));
+    }
+
+    /// The ordering family reached `BytesCowsAuto` late; check it forwards for real.
+    #[test]
+    fn bytes_cows_auto_sorts_and_permutes() {
+        let data = b"zebra apple banana";
+        let mut cows =
+            BytesCowsAuto::from_iter_and_data(data.split(|&b| b == b' '), Cow::Borrowed(&data[..]))
+                .unwrap();
+
+        cows.sort();
+        assert_eq!(cows.get(0), Some(&b"apple"[..]));
+        assert_eq!(cows.get(2), Some(&b"zebra"[..]));
+
+        cows.permute(&[2, 1, 0]).unwrap();
+        assert_eq!(cows.get(0), Some(&b"zebra"[..]));
+        assert_eq!(cows.bytes_per_entry(), 5);
+        assert_eq!(cows.type_name(), "BytesCows<u32, u8>");
+    }
+
+    // endregion: Reorderable
 
     // region: Cows construction
 

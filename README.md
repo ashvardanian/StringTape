@@ -14,7 +14,7 @@ The first reason is about __RAM__!
 In addition to storing 3 pointers for every `String` instance, your underlying memory allocator may store 2-4 pointers per heap entry.
 Assuming most English words are under 8 bytes long, storing an extra 6 pointers on a 64-bit machine results in a 7x memory usage amplification:
 
-```rust
+```rust,ignore
 let doc = fs::read_to_string("enwik9.txt")?;    // 1.0 GB
 let words = doc.split_whitespace();             // ~ 160 M words
 let buffers = words.map(str::as_bytes);
@@ -45,7 +45,8 @@ With tapes and cows, this is easy, just don't forget to use custom allocators, l
 ## Quick Start
 
 ```rust
-use stringtape::{CharsTapeI32, BytesTapeI32, StringTapeError};
+use stringtape::{CharsTapeI32, CharsTapeAuto, CharsCowsAuto, StringTapeError};
+use std::borrow::Cow;
 
 // Create a new CharsTape with 32-bit offsets
 let mut tape = CharsTapeI32::new();
@@ -71,7 +72,7 @@ let cows = CharsCowsAuto::from_iter_and_data(
     data.split_whitespace(),
     Cow::Borrowed(data.as_bytes()),
 )?;
-
+assert_eq!(cows.len(), 2);
 # Ok::<(), StringTapeError>(())
 ```
 
@@ -101,7 +102,7 @@ Consider switching to `CharsTape` or `BytesTape` in such cases.
 ### Basic Operations
 
 ```rust
-use stringtape::CharsTapeI32;
+use stringtape::{CharsTapeI32, StringTapeError};
 
 let mut tape = CharsTapeI32::new();
 tape.push("hello")?;                    // Append one string
@@ -120,23 +121,48 @@ for s in tape.iter().rev() {            // Reverse iteration
 // Construct from iterator
 let tape2: CharsTapeI32 = ["a", "b", "c"].into_iter().collect();
 
-// Sort & compare in-place
-tape.sort();
-tape.sort_by(|a, b| a.len().cmp(&b.len()));
-assert!(tape < tape2);                  // Lexicographic comparison
+// Compare in-place
+assert!(tape > tape2);                  // Lexicographic comparison, "hello" > "a"
 
 // Utility methods
 tape.first();                           // First element
 tape.last();                            // Last element
 tape.pop();                             // Remove last
 tape.shrink_to_fit()?;                  // Reduce memory usage
+# Ok::<(), StringTapeError>(())
 ```
 
-`BytesTape` and `CharsCowsAuto`/`BytesCowsAuto` provide the same interface.
+`BytesTape` provides the same interface over `&[u8]` instead of `&str`.
+
+Tapes do not sort.
+Reordering a tape would move the payload, which is exactly what the layout exists to avoid.
+Convert to a cows collection instead — it reorders compact `(offset, length)` entries and leaves the bytes untouched:
+
+```rust
+use stringtape::{CharsTapeI32, CharsCows, Reorderable, StringTapeError};
+
+let mut tape = CharsTapeI32::new();
+tape.extend(["zebra", "apple", "banana"])?;
+
+let mut cows: CharsCows<i32, u16> = tape.as_reorderable()?;
+cows.sort();
+cows.sort_by(|first, second| first.len().cmp(&second.len()));
+
+// An external SIMD argument sort can compute the order instead
+cows.permute(&[2, 0, 1])?;
+# Ok::<(), StringTapeError>(())
+```
+
+`CharsCows`, `BytesCows`, `CharsCowsAuto` and `BytesCowsAuto` all implement the `Reorderable` trait, which is what keeps their reordering surfaces identical.
 
 ### Views and Slicing
 
 ```rust
+use stringtape::{CharsTapeI32, StringTapeError};
+
+let mut tape = CharsTapeI32::new();
+tape.extend(["hello", "world", "foo"])?;
+
 let view = tape.view();              // View entire tape
 let subview = tape.subview(1, 3)?;   // Items [1, 3)
 let nested = subview.subview(0, 1)?; // Nested subviews
@@ -145,31 +171,39 @@ let spanned = &tape[1..3];           // Text of items [1, 3) in one slice
 // Views have same API as tapes
 assert_eq!(subview.len(), 2);
 assert_eq!(&subview[0], "world");
+assert_eq!(nested.len(), 1);
+assert_eq!(spanned, "worldfoo");
+# Ok::<(), StringTapeError>(())
 ```
 
 ### Memory Management
 
 ```rust
+use stringtape::{CharsTape, CharsTapeI32, StringTapeError};
+
 // Pre-allocate capacity
-let tape = CharsTapeI32::with_capacity(1024, 100)?; // 1KB data, 100 strings
+let mut tape = CharsTapeI32::with_capacity(1024, 100)?; // 1KB data, 100 strings
+assert!(tape.capacity() >= 100);
 
 // Monitor usage
 println!("Items: {}, Data: {} bytes", tape.len(), tape.data_len());
 
 // Modify
-tape.clear();           // Remove all items
-tape.truncate(5);       // Keep first 5 items
+tape.truncate(5);           // Keep first 5 items
+tape.clear();               // Remove all items
+tape.reserve(4096, 64)?;    // Size up for the next batch in one step
 
 // Custom allocators
 use allocator_api2::alloc::Global;
-let tape = CharsTape::new_in(Global);
+let in_global: CharsTapeI32 = CharsTape::new_in(Global);
+# Ok::<(), StringTapeError>(())
 ```
 
 ### Apache Arrow Interop
 
 True zero-copy conversion to/from Arrow arrays:
 
-```rust
+```rust,ignore
 // CharsTape → Arrow (zero-copy)
 let (data_slice, offsets_slice) = tape.arrow_slices();
 let data_buffer = Buffer::from_slice_ref(data_slice);
@@ -194,11 +228,20 @@ let view = unsafe {
 Auto variants automatically select the most memory-efficient types based on data size:
 
 ```rust
+use stringtape::{CharsTapeAuto, CharsCowsAuto, StringTapeError};
+use std::borrow::Cow;
+
+let data = "hello world";
+let strings = data.split_whitespace();
+
 // CharsTapeAuto: selects I32/U32/U64 offset based on total data size
-let tape = CharsTapeAuto::from_iter(strings);
+let tape = CharsTapeAuto::from_iter(strings.clone());
+assert_eq!(tape.type_name(), "CharsTape<i32>");
 
 // CharsCowsAuto: selects offset (U32/U64) and length (U8/U16/U32) types
-let cows = CharsCowsAuto::from_iter_and_data(strings, data)?;
+let cows = CharsCowsAuto::from_iter_and_data(strings, Cow::Borrowed(data.as_bytes()))?;
+assert_eq!(cows.type_name(), "CharsCows<u32, u8>");
+# Ok::<(), StringTapeError>(())
 ```
 
 Available: `CharsTapeAuto`, `BytesTapeAuto`, `CharsCowsAuto`, `BytesCowsAuto`.
@@ -213,7 +256,8 @@ These cannot be converted to/from Arrow arrays.
 All tape and view types implement standard Rust traits: `Debug`, `Clone`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Hash`, `Default`, `FromIterator`, `Extend`, `IntoIterator`, `Iterator`, `ExactSizeIterator`, `DoubleEndedIterator`, `Send`, `Sync`.
 
 ```rust
-use std::collections::{HashMap, HashSet};
+use stringtape::{CharsTapeI32, StringTapeError};
+use std::collections::HashMap;
 
 let mut tape1 = CharsTapeI32::new();
 tape1.push("hello")?;
@@ -230,6 +274,7 @@ map.insert(tape1, 42);                  // Hash
 for s in tape2.iter().rev() {           // DoubleEndedIterator
     println!("{}", s);
 }
+# Ok::<(), StringTapeError>(())
 ```
 
 ## `no_std` Support
