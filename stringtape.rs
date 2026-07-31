@@ -110,6 +110,7 @@ use allocator_api2::alloc::{Allocator, Global, Layout};
 
 /// Errors that can occur when working with tape classes.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StringTapeError {
     /// Data size exceeds offset type maximum (e.g., >2GB for 32-bit offsets).
     OffsetOverflow,
@@ -119,6 +120,8 @@ pub enum StringTapeError {
     IndexOutOfBounds,
     /// Invalid UTF-8 sequence.
     Utf8Error(core::str::Utf8Error),
+    /// Reorder argument is not a permutation of the collection.
+    NotAPermutation,
 }
 
 impl fmt::Display for StringTapeError {
@@ -128,6 +131,9 @@ impl fmt::Display for StringTapeError {
             StringTapeError::AllocationError => write!(f, "memory allocation failed"),
             StringTapeError::IndexOutOfBounds => write!(f, "index out of bounds"),
             StringTapeError::Utf8Error(e) => write!(f, "invalid UTF-8: {}", e),
+            StringTapeError::NotAPermutation => {
+                write!(f, "order is not a permutation of the collection")
+            }
         }
     }
 }
@@ -744,12 +750,6 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
         self.len_bytes
     }
 
-    /// Returns the number of items currently stored (same as `len()`).
-    #[allow(dead_code)]
-    pub fn capacity(&self) -> usize {
-        self.len_items
-    }
-
     /// Returns the number of bytes allocated for string data.
     pub fn data_capacity(&self) -> usize {
         self.data.map(|ptr| ptr.len()).unwrap_or(0)
@@ -844,6 +844,19 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
         }
     }
 
+    /// Returns a mutable slice view of the data buffer.
+    ///
+    /// Offsets are untouched, so every item keeps its position and length.
+    pub fn data_slice_mut(&mut self) -> &mut [u8] {
+        if let Some(data_ptr) = self.data {
+            unsafe {
+                core::slice::from_raw_parts_mut(data_ptr.as_ptr().cast::<u8>(), self.len_bytes)
+            }
+        } else {
+            &mut []
+        }
+    }
+
     /// Returns a slice view of the offsets buffer.
     ///
     /// This provides a cleaner interface for accessing the underlying offsets
@@ -909,11 +922,9 @@ impl<Offset: OffsetType, A: Allocator> Index<Range<usize>> for RawTape<Offset, A
     type Output = [u8];
 
     fn index(&self, range: Range<usize>) -> &Self::Output {
-        let view = self
-            .subview(range.start, range.end)
-            .expect("range out of bounds");
-        // Return the underlying data slice
-        view.data
+        self.subview(range.start, range.end)
+            .expect("range out of bounds")
+            .spanned_bytes()
     }
 }
 
@@ -921,10 +932,9 @@ impl<Offset: OffsetType, A: Allocator> Index<RangeFrom<usize>> for RawTape<Offse
     type Output = [u8];
 
     fn index(&self, range: RangeFrom<usize>) -> &Self::Output {
-        let view = self
-            .subview(range.start, self.len_items)
-            .expect("range out of bounds");
-        view.data
+        self.subview(range.start, self.len_items)
+            .expect("range out of bounds")
+            .spanned_bytes()
     }
 }
 
@@ -932,8 +942,9 @@ impl<Offset: OffsetType, A: Allocator> Index<RangeTo<usize>> for RawTape<Offset,
     type Output = [u8];
 
     fn index(&self, range: RangeTo<usize>) -> &Self::Output {
-        let view = self.subview(0, range.end).expect("range out of bounds");
-        view.data
+        self.subview(0, range.end)
+            .expect("range out of bounds")
+            .spanned_bytes()
     }
 }
 
@@ -941,8 +952,7 @@ impl<Offset: OffsetType, A: Allocator> Index<RangeFull> for RawTape<Offset, A> {
     type Output = [u8];
 
     fn index(&self, _range: RangeFull) -> &Self::Output {
-        let view = self.view();
-        view.data
+        self.view().spanned_bytes()
     }
 }
 
@@ -950,10 +960,9 @@ impl<Offset: OffsetType, A: Allocator> Index<RangeInclusive<usize>> for RawTape<
     type Output = [u8];
 
     fn index(&self, range: RangeInclusive<usize>) -> &Self::Output {
-        let view = self
-            .subview(*range.start(), range.end() + 1)
-            .expect("range out of bounds");
-        view.data
+        self.subview(*range.start(), range.end() + 1)
+            .expect("range out of bounds")
+            .spanned_bytes()
     }
 }
 
@@ -961,8 +970,9 @@ impl<Offset: OffsetType, A: Allocator> Index<RangeToInclusive<usize>> for RawTap
     type Output = [u8];
 
     fn index(&self, range: RangeToInclusive<usize>) -> &Self::Output {
-        let view = self.subview(0, range.end + 1).expect("range out of bounds");
-        view.data
+        self.subview(0, range.end + 1)
+            .expect("range out of bounds")
+            .spanned_bytes()
     }
 }
 
@@ -1070,6 +1080,21 @@ impl<'a, Offset: OffsetType> RawTapeView<'a, Offset> {
         })
     }
 
+    /// Returns the bytes of every item in this view.
+    ///
+    /// `data` spans the whole parent tape so the view stays Arrow-compatible, so the
+    /// span has to be recovered from the first and last offsets.
+    fn spanned_bytes(&self) -> &'a [u8] {
+        match self.offsets.split_first() {
+            Some((first, _)) => {
+                let start = first.to_usize();
+                let end = self.offsets[self.offsets.len() - 1].to_usize();
+                &self.data[start..end]
+            }
+            None => &[],
+        }
+    }
+
     /// Returns the raw parts of the view for Apache Arrow compatibility.
     pub fn as_raw_parts(&self) -> RawParts<Offset> {
         // Expose an Arrow-compatible view: data_ptr remains at the tape base,
@@ -1096,12 +1121,9 @@ impl<'a, Offset: OffsetType> Index<Range<usize>> for RawTapeView<'a, Offset> {
     type Output = [u8];
 
     fn index(&self, range: Range<usize>) -> &Self::Output {
-        let view = self
-            .subview(range.start, range.end)
-            .expect("range out of bounds");
-        let start = view.offsets[0].to_usize();
-        let end = view.offsets[view.offsets.len() - 1].to_usize();
-        &view.data[start..end]
+        self.subview(range.start, range.end)
+            .expect("range out of bounds")
+            .spanned_bytes()
     }
 }
 
@@ -1109,12 +1131,9 @@ impl<'a, Offset: OffsetType> Index<RangeFrom<usize>> for RawTapeView<'a, Offset>
     type Output = [u8];
 
     fn index(&self, range: RangeFrom<usize>) -> &Self::Output {
-        let view = self
-            .subview(range.start, self.len())
-            .expect("range out of bounds");
-        let start = view.offsets[0].to_usize();
-        let end = view.offsets[view.offsets.len() - 1].to_usize();
-        &view.data[start..end]
+        self.subview(range.start, self.len())
+            .expect("range out of bounds")
+            .spanned_bytes()
     }
 }
 
@@ -1122,10 +1141,9 @@ impl<'a, Offset: OffsetType> Index<RangeTo<usize>> for RawTapeView<'a, Offset> {
     type Output = [u8];
 
     fn index(&self, range: RangeTo<usize>) -> &Self::Output {
-        let view = self.subview(0, range.end).expect("range out of bounds");
-        let start = view.offsets[0].to_usize();
-        let end = view.offsets[view.offsets.len() - 1].to_usize();
-        &view.data[start..end]
+        self.subview(0, range.end)
+            .expect("range out of bounds")
+            .spanned_bytes()
     }
 }
 
@@ -1133,9 +1151,7 @@ impl<'a, Offset: OffsetType> Index<RangeFull> for RawTapeView<'a, Offset> {
     type Output = [u8];
 
     fn index(&self, _range: RangeFull) -> &Self::Output {
-        let start = self.offsets[0].to_usize();
-        let end = self.offsets[self.offsets.len() - 1].to_usize();
-        &self.data[start..end]
+        self.spanned_bytes()
     }
 }
 
@@ -1143,12 +1159,9 @@ impl<'a, Offset: OffsetType> Index<RangeInclusive<usize>> for RawTapeView<'a, Of
     type Output = [u8];
 
     fn index(&self, range: RangeInclusive<usize>) -> &Self::Output {
-        let view = self
-            .subview(*range.start(), range.end() + 1)
-            .expect("range out of bounds");
-        let start = view.offsets[0].to_usize();
-        let end = view.offsets[view.offsets.len() - 1].to_usize();
-        &view.data[start..end]
+        self.subview(*range.start(), range.end() + 1)
+            .expect("range out of bounds")
+            .spanned_bytes()
     }
 }
 
@@ -1156,10 +1169,9 @@ impl<'a, Offset: OffsetType> Index<RangeToInclusive<usize>> for RawTapeView<'a, 
     type Output = [u8];
 
     fn index(&self, range: RangeToInclusive<usize>) -> &Self::Output {
-        let view = self.subview(0, range.end + 1).expect("range out of bounds");
-        let start = view.offsets[0].to_usize();
-        let end = view.offsets[view.offsets.len() - 1].to_usize();
-        &view.data[start..end]
+        self.subview(0, range.end + 1)
+            .expect("range out of bounds")
+            .spanned_bytes()
     }
 }
 
@@ -1297,6 +1309,67 @@ impl<'a, Offset: OffsetType> Index<usize> for CharsTapeView<'a, Offset> {
 
     fn index(&self, index: usize) -> &Self::Output {
         self.get(index).expect("index out of bounds")
+    }
+}
+
+/// Reinterprets the bytes spanned by whole items as a string.
+///
+/// # Safety
+///
+/// The span must cover whole items of a UTF-8 validated tape, which is what every range
+/// `Index` implementation below passes in.
+#[inline]
+unsafe fn spanned_str(bytes: &[u8]) -> &str {
+    core::str::from_utf8_unchecked(bytes)
+}
+
+// Range indexing yields the text spanned by the selected items. Item boundaries are
+// character boundaries, so the span is valid UTF-8 without revalidation.
+impl<'a, Offset: OffsetType> Index<Range<usize>> for CharsTapeView<'a, Offset> {
+    type Output = str;
+
+    fn index(&self, range: Range<usize>) -> &Self::Output {
+        unsafe { spanned_str(&self.inner[range]) }
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<RangeFrom<usize>> for CharsTapeView<'a, Offset> {
+    type Output = str;
+
+    fn index(&self, range: RangeFrom<usize>) -> &Self::Output {
+        unsafe { spanned_str(&self.inner[range]) }
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<RangeTo<usize>> for CharsTapeView<'a, Offset> {
+    type Output = str;
+
+    fn index(&self, range: RangeTo<usize>) -> &Self::Output {
+        unsafe { spanned_str(&self.inner[range]) }
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<RangeFull> for CharsTapeView<'a, Offset> {
+    type Output = str;
+
+    fn index(&self, range: RangeFull) -> &Self::Output {
+        unsafe { spanned_str(&self.inner[range]) }
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<RangeInclusive<usize>> for CharsTapeView<'a, Offset> {
+    type Output = str;
+
+    fn index(&self, range: RangeInclusive<usize>) -> &Self::Output {
+        unsafe { spanned_str(&self.inner[range]) }
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<RangeToInclusive<usize>> for CharsTapeView<'a, Offset> {
+    type Output = str;
+
+    fn index(&self, range: RangeToInclusive<usize>) -> &Self::Output {
+        unsafe { spanned_str(&self.inner[range]) }
     }
 }
 
@@ -1503,6 +1576,55 @@ impl<'a, Offset: OffsetType> Index<usize> for BytesTapeView<'a, Offset> {
     }
 }
 
+// Range indexing yields the bytes spanned by the selected items.
+impl<'a, Offset: OffsetType> Index<Range<usize>> for BytesTapeView<'a, Offset> {
+    type Output = [u8];
+
+    fn index(&self, range: Range<usize>) -> &Self::Output {
+        &self.inner[range]
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<RangeFrom<usize>> for BytesTapeView<'a, Offset> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeFrom<usize>) -> &Self::Output {
+        &self.inner[range]
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<RangeTo<usize>> for BytesTapeView<'a, Offset> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeTo<usize>) -> &Self::Output {
+        &self.inner[range]
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<RangeFull> for BytesTapeView<'a, Offset> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeFull) -> &Self::Output {
+        &self.inner[range]
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<RangeInclusive<usize>> for BytesTapeView<'a, Offset> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeInclusive<usize>) -> &Self::Output {
+        &self.inner[range]
+    }
+}
+
+impl<'a, Offset: OffsetType> Index<RangeToInclusive<usize>> for BytesTapeView<'a, Offset> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeToInclusive<usize>) -> &Self::Output {
+        &self.inner[range]
+    }
+}
+
 impl<'a, Offset: OffsetType> IntoIterator for &'a BytesTapeView<'a, Offset> {
     type Item = &'a [u8];
     type IntoIter = BytesTapeViewIter<'a, Offset>;
@@ -1654,9 +1776,21 @@ impl<Offset: OffsetType, A: Allocator> CharsTape<Offset, A> {
         self.inner.data_len()
     }
 
-    /// Returns the number of strings currently stored (same as `len()`).
+    /// Returns the number of strings that can be stored without reallocating.
+    ///
+    /// One less than the offset slot count, which holds `len() + 1` entries.
     pub fn capacity(&self) -> usize {
-        self.inner.len()
+        self.inner.offsets_capacity().saturating_sub(1)
+    }
+
+    /// Reserves room for `additional_bytes` more bytes and `additional_strings` more
+    /// strings, sizing a cleared tape for the next batch in one step.
+    pub fn reserve(
+        &mut self,
+        additional_bytes: usize,
+        additional_strings: usize,
+    ) -> Result<(), StringTapeError> {
+        self.inner.reserve(additional_bytes, additional_strings)
     }
 
     /// Returns the number of bytes allocated for string data.
@@ -1738,6 +1872,9 @@ impl<Offset: OffsetType, A: Allocator> CharsTape<Offset, A> {
     }
 
     /// Returns a slice view of the data buffer.
+    ///
+    /// There is no mutable counterpart: writing bytes could break the UTF-8 invariant.
+    /// Use [`CharsTape::into_bytes_tape`] when raw mutation is the goal.
     pub fn data_slice(&self) -> &[u8] {
         self.inner.data_slice()
     }
@@ -1963,6 +2100,55 @@ impl<Offset: OffsetType, A: Allocator> Index<usize> for CharsTape<Offset, A> {
     }
 }
 
+// Range indexing yields the text spanned by the selected strings.
+impl<Offset: OffsetType, A: Allocator> Index<Range<usize>> for CharsTape<Offset, A> {
+    type Output = str;
+
+    fn index(&self, range: Range<usize>) -> &Self::Output {
+        unsafe { spanned_str(&self.inner[range]) }
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Index<RangeFrom<usize>> for CharsTape<Offset, A> {
+    type Output = str;
+
+    fn index(&self, range: RangeFrom<usize>) -> &Self::Output {
+        unsafe { spanned_str(&self.inner[range]) }
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Index<RangeTo<usize>> for CharsTape<Offset, A> {
+    type Output = str;
+
+    fn index(&self, range: RangeTo<usize>) -> &Self::Output {
+        unsafe { spanned_str(&self.inner[range]) }
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Index<RangeFull> for CharsTape<Offset, A> {
+    type Output = str;
+
+    fn index(&self, range: RangeFull) -> &Self::Output {
+        unsafe { spanned_str(&self.inner[range]) }
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Index<RangeInclusive<usize>> for CharsTape<Offset, A> {
+    type Output = str;
+
+    fn index(&self, range: RangeInclusive<usize>) -> &Self::Output {
+        unsafe { spanned_str(&self.inner[range]) }
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Index<RangeToInclusive<usize>> for CharsTape<Offset, A> {
+    type Output = str;
+
+    fn index(&self, range: RangeToInclusive<usize>) -> &Self::Output {
+        unsafe { spanned_str(&self.inner[range]) }
+    }
+}
+
 impl<'a, Offset: OffsetType, A: Allocator> IntoIterator for &'a CharsTape<Offset, A> {
     type Item = &'a str;
     type IntoIter = CharsTapeIter<'a, Offset, A>;
@@ -2059,6 +2245,23 @@ impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
         self.inner.data_len()
     }
 
+    /// Returns the number of items that can be stored without reallocating.
+    ///
+    /// One less than the offset slot count, which holds `len() + 1` entries.
+    pub fn capacity(&self) -> usize {
+        self.inner.offsets_capacity().saturating_sub(1)
+    }
+
+    /// Reserves room for `additional_bytes` more bytes and `additional_items` more items,
+    /// sizing a cleared tape for the next batch in one step.
+    pub fn reserve(
+        &mut self,
+        additional_bytes: usize,
+        additional_items: usize,
+    ) -> Result<(), StringTapeError> {
+        self.inner.reserve(additional_bytes, additional_items)
+    }
+
     /// Returns the number of bytes allocated for data.
     pub fn data_capacity(&self) -> usize {
         self.inner.data_capacity()
@@ -2137,6 +2340,14 @@ impl<Offset: OffsetType, A: Allocator> BytesTape<Offset, A> {
     /// Returns a slice view of the data buffer.
     pub fn data_slice(&self) -> &[u8] {
         self.inner.data_slice()
+    }
+
+    /// Returns a mutable slice view of the data buffer.
+    ///
+    /// Offsets are untouched, so this suits length-preserving transforms applied across
+    /// the whole tape at once rather than item by item.
+    pub fn data_slice_mut(&mut self) -> &mut [u8] {
+        self.inner.data_slice_mut()
     }
 
     /// Returns a slice view of the offsets buffer.
@@ -2281,6 +2492,55 @@ impl<Offset: OffsetType, A: Allocator> Index<usize> for BytesTape<Offset, A> {
 
     fn index(&self, index: usize) -> &Self::Output {
         self.get(index).expect("index out of bounds")
+    }
+}
+
+// Range indexing yields the bytes spanned by the selected items.
+impl<Offset: OffsetType, A: Allocator> Index<Range<usize>> for BytesTape<Offset, A> {
+    type Output = [u8];
+
+    fn index(&self, range: Range<usize>) -> &Self::Output {
+        &self.inner[range]
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Index<RangeFrom<usize>> for BytesTape<Offset, A> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeFrom<usize>) -> &Self::Output {
+        &self.inner[range]
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Index<RangeTo<usize>> for BytesTape<Offset, A> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeTo<usize>) -> &Self::Output {
+        &self.inner[range]
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Index<RangeFull> for BytesTape<Offset, A> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeFull) -> &Self::Output {
+        &self.inner[range]
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Index<RangeInclusive<usize>> for BytesTape<Offset, A> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeInclusive<usize>) -> &Self::Output {
+        &self.inner[range]
+    }
+}
+
+impl<Offset: OffsetType, A: Allocator> Index<RangeToInclusive<usize>> for BytesTape<Offset, A> {
+    type Output = [u8];
+
+    fn index(&self, range: RangeToInclusive<usize>) -> &Self::Output {
+        &self.inner[range]
     }
 }
 
@@ -2519,6 +2779,114 @@ struct PackedEntry<Offset, Length> {
     length: Length,
 }
 
+impl<Offset: OffsetType, Length: LengthType> PackedEntry<Offset, Length> {
+    /// Returns the half-open byte range this entry points at.
+    ///
+    /// Taken by value because the struct is packed, so its fields cannot be borrowed.
+    #[inline]
+    fn range(self) -> Range<usize> {
+        let start = self.offset.to_usize();
+        start..start + self.length.to_usize()
+    }
+}
+
+/// Returns the bytes one entry points at.
+#[inline]
+fn slice_at<Offset: OffsetType, Length: LengthType>(
+    data: &[u8],
+    entry: PackedEntry<Offset, Length>,
+) -> &[u8] {
+    &data[entry.range()]
+}
+
+/// Returns the string one entry points at.
+///
+/// # Safety
+///
+/// The entry must span validated UTF-8, which every constructor of [`CharsCows`]
+/// guarantees.
+#[inline]
+unsafe fn str_at<Offset: OffsetType, Length: LengthType>(
+    data: &[u8],
+    entry: PackedEntry<Offset, Length>,
+) -> &str {
+    core::str::from_utf8_unchecked(slice_at(data, entry))
+}
+
+/// Views a string item as bytes, so string and byte inputs share one entry builder.
+///
+/// Wraps rather than maps because an owned `String` item must outlive the borrow taken
+/// from it.
+struct StrAsBytes<T>(T);
+
+impl<T: AsRef<str>> AsRef<[u8]> for StrAsBytes<T> {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref().as_bytes()
+    }
+}
+
+/// Builds entries for slices that already live inside `data`, by pointer difference.
+fn entries_from_slices<Offset: OffsetType, Length: LengthType, I>(
+    iter: I,
+    data: &[u8],
+) -> Result<Vec<PackedEntry<Offset, Length>>, StringTapeError>
+where
+    I: IntoIterator,
+    I::Item: AsRef<[u8]>,
+{
+    let data_ptr = data.as_ptr() as usize;
+    let data_end = data_ptr + data.len();
+    let mut entries = Vec::new();
+
+    for item in iter {
+        let bytes = item.as_ref();
+        let item_ptr = bytes.as_ptr() as usize;
+        if item_ptr < data_ptr || item_ptr > data_end {
+            return Err(StringTapeError::IndexOutOfBounds);
+        }
+
+        let offset = item_ptr - data_ptr;
+        let length = bytes.len();
+        if offset + length > data.len() {
+            return Err(StringTapeError::IndexOutOfBounds);
+        }
+
+        entries.push(PackedEntry {
+            offset: Offset::from_usize(offset).ok_or(StringTapeError::OffsetOverflow)?,
+            length: Length::from_usize(length).ok_or(StringTapeError::OffsetOverflow)?,
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Builds entries from explicit `(offset, length)` pairs, bounded by `data_len`.
+fn entries_from_offsets<Offset: OffsetType, Length: LengthType, I>(
+    iter: I,
+    data_len: usize,
+) -> Result<Vec<PackedEntry<Offset, Length>>, StringTapeError>
+where
+    I: IntoIterator<Item = (usize, usize)>,
+{
+    let mut entries = Vec::new();
+
+    for (offset, length) in iter {
+        let end = offset
+            .checked_add(length)
+            .ok_or(StringTapeError::OffsetOverflow)?;
+        if end > data_len {
+            return Err(StringTapeError::IndexOutOfBounds);
+        }
+
+        entries.push(PackedEntry {
+            offset: Offset::from_usize(offset).ok_or(StringTapeError::OffsetOverflow)?,
+            length: Length::from_usize(length).ok_or(StringTapeError::OffsetOverflow)?,
+        });
+    }
+
+    Ok(entries)
+}
+
 /// A memory-efficient collection of string slices with configurable offset and length types.
 ///
 /// `CharsCows` stores references to string slices in a shared data buffer using compact
@@ -2601,49 +2969,36 @@ impl<'a, Offset: OffsetType, Length: LengthType> CharsCows<'a, Offset, Length> {
         I: IntoIterator,
         I::Item: AsRef<str>,
     {
-        let data_ptr = data.as_ptr() as usize;
-        let data_end = data_ptr + data.len();
-        let mut entries = Vec::new();
+        let entries = entries_from_slices(iter.into_iter().map(StrAsBytes), data.as_ref())?;
+        Ok(Self { data, entries })
+    }
 
-        for s in iter {
-            let s_ref = s.as_ref();
-            let s_bytes = s_ref.as_bytes();
-            let s_ptr = s_bytes.as_ptr() as usize;
-
-            // Calculate offset from base pointer
-            if s_ptr < data_ptr || s_ptr > data_end {
-                return Err(StringTapeError::IndexOutOfBounds);
-            }
-
-            let offset = s_ptr - data_ptr;
-            let length = s_bytes.len();
-
-            if offset + length > data.len() {
-                return Err(StringTapeError::IndexOutOfBounds);
-            }
-
-            let offset_typed = Offset::from_usize(offset).ok_or(StringTapeError::OffsetOverflow)?;
-            let length_typed = Length::from_usize(length).ok_or(StringTapeError::OffsetOverflow)?;
-
-            entries.push(PackedEntry {
-                offset: offset_typed,
-                length: length_typed,
-            });
+    /// Creates a CharsCows from an iterator of `(offset, length)` pairs and a data buffer.
+    ///
+    /// Each span is validated as UTF-8, since every accessor on this type assumes it.
+    ///
+    /// # Errors
+    ///
+    /// - `OffsetOverflow` if offset/length exceeds type maximum
+    /// - `IndexOutOfBounds` if a span reaches past the data buffer
+    /// - `Utf8Error` if a span is not valid UTF-8
+    pub fn from_offsets_and_data<I>(iter: I, data: Cow<'a, [u8]>) -> Result<Self, StringTapeError>
+    where
+        I: IntoIterator<Item = (usize, usize)>,
+    {
+        let entries: Vec<PackedEntry<Offset, Length>> = entries_from_offsets(iter, data.len())?;
+        for entry in &entries {
+            core::str::from_utf8(slice_at(&data, *entry)).map_err(StringTapeError::Utf8Error)?;
         }
-
         Ok(Self { data, entries })
     }
 
     /// Returns a reference to the string at the given index, or `None` if out of bounds.
     pub fn get(&self, index: usize) -> Option<&'_ str> {
-        self.entries.get(index).map(|entry| {
-            // Must copy fields from packed struct (can't take references)
-            let start = entry.offset.to_usize();
-            let len = entry.length.to_usize();
-            // Safety: UTF-8 validated during construction
-            // The lifetime of the returned &str is tied to self.data, not self
-            unsafe { core::str::from_utf8_unchecked(&self.data[start..start + len]) }
-        })
+        // Safety: UTF-8 validated during construction
+        self.entries
+            .get(index)
+            .map(|entry| unsafe { str_at(&self.data, *entry) })
     }
 
     /// Returns a reference to the string at the given index without bounds checking.
@@ -2653,11 +3008,7 @@ impl<'a, Offset: OffsetType, Length: LengthType> CharsCows<'a, Offset, Length> {
     /// Caller must ensure `index < self.len()`.
     #[inline]
     pub unsafe fn get_unchecked(&self, index: usize) -> &str {
-        let entry = self.entries.get_unchecked(index);
-        let start = entry.offset.to_usize();
-        let len = entry.length.to_usize();
-        // Safety: UTF-8 validated during construction
-        core::str::from_utf8_unchecked(self.data.get_unchecked(start..start + len))
+        str_at(&self.data, *self.entries.get_unchecked(index))
     }
 
     /// Returns the number of slices in the collection.
@@ -2727,46 +3078,19 @@ impl<'a, Offset: OffsetType, Length: LengthType> CharsCows<'a, Offset, Length> {
     /// assert_eq!(sorted, vec!["apple", "banana", "zebra"]);
     /// # Ok::<(), stringtape::StringTapeError>(())
     /// ```
-    pub fn sort(&mut self)
-    where
-        Offset: OffsetType,
-        Length: LengthType,
-    {
-        self.entries.sort_by(|a, b| {
-            let str_a = {
-                let start = a.offset.to_usize();
-                let len = a.length.to_usize();
-                unsafe { core::str::from_utf8_unchecked(&self.data[start..start + len]) }
-            };
-            let str_b = {
-                let start = b.offset.to_usize();
-                let len = b.length.to_usize();
-                unsafe { core::str::from_utf8_unchecked(&self.data[start..start + len]) }
-            };
-            str_a.cmp(str_b)
-        });
+    pub fn sort(&mut self) {
+        let data = &self.data;
+        self.entries
+            .sort_by(|first, second| unsafe { str_at(data, *first).cmp(str_at(data, *second)) });
     }
 
     /// Sorts the slices in-place using an unstable sorting algorithm.
     ///
     /// This is faster than stable sort but may not preserve the order of equal elements.
-    pub fn sort_unstable(&mut self)
-    where
-        Offset: OffsetType,
-        Length: LengthType,
-    {
-        self.entries.sort_unstable_by(|a, b| {
-            let str_a = {
-                let start = a.offset.to_usize();
-                let len = a.length.to_usize();
-                unsafe { core::str::from_utf8_unchecked(&self.data[start..start + len]) }
-            };
-            let str_b = {
-                let start = b.offset.to_usize();
-                let len = b.length.to_usize();
-                unsafe { core::str::from_utf8_unchecked(&self.data[start..start + len]) }
-            };
-            str_a.cmp(str_b)
+    pub fn sort_unstable(&mut self) {
+        let data = &self.data;
+        self.entries.sort_unstable_by(|first, second| unsafe {
+            str_at(data, *first).cmp(str_at(data, *second))
         });
     }
 
@@ -2793,21 +3117,10 @@ impl<'a, Offset: OffsetType, Length: LengthType> CharsCows<'a, Offset, Length> {
     pub fn sort_by<F>(&mut self, mut compare: F)
     where
         F: FnMut(&str, &str) -> core::cmp::Ordering,
-        Offset: OffsetType,
-        Length: LengthType,
     {
-        self.entries.sort_by(|a, b| {
-            let str_a = {
-                let start = a.offset.to_usize();
-                let len = a.length.to_usize();
-                unsafe { core::str::from_utf8_unchecked(&self.data[start..start + len]) }
-            };
-            let str_b = {
-                let start = b.offset.to_usize();
-                let len = b.length.to_usize();
-                unsafe { core::str::from_utf8_unchecked(&self.data[start..start + len]) }
-            };
-            compare(str_a, str_b)
+        let data = &self.data;
+        self.entries.sort_by(|first, second| unsafe {
+            compare(str_at(data, *first), str_at(data, *second))
         });
     }
 
@@ -2831,19 +3144,41 @@ impl<'a, Offset: OffsetType, Length: LengthType> CharsCows<'a, Offset, Length> {
     /// assert_eq!(sorted, vec!["c", "bb", "aaa"]);
     /// # Ok::<(), stringtape::StringTapeError>(())
     /// ```
-    pub fn sort_by_key<K, F>(&mut self, mut f: F)
+    pub fn sort_by_key<K, F>(&mut self, mut key_of: F)
     where
         F: FnMut(&str) -> K,
         K: Ord,
-        Offset: OffsetType,
-        Length: LengthType,
     {
-        self.entries.sort_by_key(|entry| {
-            let start = entry.offset.to_usize();
-            let len = entry.length.to_usize();
-            let s = unsafe { core::str::from_utf8_unchecked(&self.data[start..start + len]) };
-            f(s)
-        });
+        let data = &self.data;
+        self.entries
+            .sort_by_key(|entry| key_of(unsafe { str_at(data, *entry) }));
+    }
+
+    /// Reorders the slices to match `order`, a permutation of `0..len()`.
+    ///
+    /// Pairs with an external solver: a SIMD argument sort such as
+    /// `stringzilla::sz::argsort_by` computes the order, and this applies it. Only the
+    /// compact entries move.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::CharsCowsU32U8;
+    /// use std::borrow::Cow;
+    ///
+    /// let data = "alpha beta gamma";
+    /// let mut cows = CharsCowsU32U8::from_iter_and_data(
+    ///     data.split_whitespace(),
+    ///     Cow::Borrowed(data.as_bytes())
+    /// ).unwrap();
+    ///
+    /// cows.permute(&[2, 0, 1]).unwrap();
+    /// let reordered: Vec<&str> = cows.iter().collect();
+    /// assert_eq!(reordered, vec!["gamma", "alpha", "beta"]);
+    /// # Ok::<(), stringtape::StringTapeError>(())
+    /// ```
+    pub fn permute(&mut self, order: &[usize]) -> Result<(), StringTapeError> {
+        permute_entries(&mut self.entries, order)
     }
 }
 
@@ -2857,34 +3192,7 @@ impl<'a, Offset: OffsetType, Length: LengthType> BytesCows<'a, Offset, Length> {
         I: IntoIterator,
         I::Item: AsRef<[u8]>,
     {
-        let data_ptr = data.as_ptr() as usize;
-        let data_end = data_ptr + data.len();
-        let mut entries = Vec::new();
-
-        for b in iter {
-            let b_ref = b.as_ref();
-            let b_ptr = b_ref.as_ptr() as usize;
-
-            if b_ptr < data_ptr || b_ptr > data_end {
-                return Err(StringTapeError::IndexOutOfBounds);
-            }
-
-            let offset = b_ptr - data_ptr;
-            let length = b_ref.len();
-
-            if offset + length > data.len() {
-                return Err(StringTapeError::IndexOutOfBounds);
-            }
-
-            let offset_typed = Offset::from_usize(offset).ok_or(StringTapeError::OffsetOverflow)?;
-            let length_typed = Length::from_usize(length).ok_or(StringTapeError::OffsetOverflow)?;
-
-            entries.push(PackedEntry {
-                offset: offset_typed,
-                length: length_typed,
-            });
-        }
-
+        let entries = entries_from_slices(iter, data.as_ref())?;
         Ok(Self { data, entries })
     }
 
@@ -2893,35 +3201,15 @@ impl<'a, Offset: OffsetType, Length: LengthType> BytesCows<'a, Offset, Length> {
     where
         I: IntoIterator<Item = (usize, usize)>,
     {
-        let mut entries = Vec::new();
-
-        for (offset, length) in iter {
-            let offset_typed = Offset::from_usize(offset).ok_or(StringTapeError::OffsetOverflow)?;
-            let length_typed = Length::from_usize(length).ok_or(StringTapeError::OffsetOverflow)?;
-
-            let end = offset
-                .checked_add(length)
-                .ok_or(StringTapeError::OffsetOverflow)?;
-            if end > data.len() {
-                return Err(StringTapeError::IndexOutOfBounds);
-            }
-
-            entries.push(PackedEntry {
-                offset: offset_typed,
-                length: length_typed,
-            });
-        }
-
+        let entries = entries_from_offsets(iter, data.len())?;
         Ok(Self { data, entries })
     }
 
     /// Returns a reference to the bytes at the given index, or `None` if out of bounds.
     pub fn get(&self, index: usize) -> Option<&[u8]> {
-        self.entries.get(index).map(|entry| {
-            let start = entry.offset.to_usize();
-            let len = entry.length.to_usize();
-            &self.data[start..start + len]
-        })
+        self.entries
+            .get(index)
+            .map(|entry| slice_at(&self.data, *entry))
     }
 
     /// Returns a reference to the bytes at the given index without bounds checking.
@@ -2931,10 +3219,8 @@ impl<'a, Offset: OffsetType, Length: LengthType> BytesCows<'a, Offset, Length> {
     /// Caller must ensure `index < self.len()`.
     #[inline]
     pub unsafe fn get_unchecked(&self, index: usize) -> &[u8] {
-        let entry = self.entries.get_unchecked(index);
-        let start = entry.offset.to_usize();
-        let len = entry.length.to_usize();
-        self.data.get_unchecked(start..start + len)
+        let entry = *self.entries.get_unchecked(index);
+        self.data.get_unchecked(entry.range())
     }
 
     /// Returns the number of slices in the collection.
@@ -3023,6 +3309,158 @@ impl<'a, Offset: OffsetType, Length: LengthType> BytesCows<'a, Offset, Length> {
             entries: self.entries.clone(),
         })
     }
+
+    /// Sorts the slices in-place in byte-lexicographic order.
+    ///
+    /// Only the compact entries move; the payload buffer is never touched.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::BytesCowsU32U16;
+    /// use std::borrow::Cow;
+    ///
+    /// let data = b"zebra apple banana";
+    /// let mut cows = BytesCowsU32U16::from_iter_and_data(
+    ///     data.split(|&b| b == b' '),
+    ///     Cow::Borrowed(&data[..])
+    /// ).unwrap();
+    ///
+    /// cows.sort();
+    /// let sorted: Vec<&[u8]> = cows.iter().collect();
+    /// assert_eq!(sorted, vec![&b"apple"[..], b"banana", b"zebra"]);
+    /// # Ok::<(), stringtape::StringTapeError>(())
+    /// ```
+    pub fn sort(&mut self) {
+        let data = &self.data;
+        self.entries
+            .sort_by(|first, second| slice_at(data, *first).cmp(slice_at(data, *second)));
+    }
+
+    /// Sorts the slices in-place using an unstable sorting algorithm.
+    ///
+    /// This is faster than stable sort but may not preserve the order of equal elements.
+    pub fn sort_unstable(&mut self) {
+        let data = &self.data;
+        self.entries
+            .sort_unstable_by(|first, second| slice_at(data, *first).cmp(slice_at(data, *second)));
+    }
+
+    /// Sorts the slices in-place with a custom comparison function.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::BytesCowsU32U16;
+    /// use std::borrow::Cow;
+    ///
+    /// let data = b"aaa bb c";
+    /// let mut cows = BytesCowsU32U16::from_iter_and_data(
+    ///     data.split(|&b| b == b' '),
+    ///     Cow::Borrowed(&data[..])
+    /// ).unwrap();
+    ///
+    /// cows.sort_by(|first, second| first.len().cmp(&second.len()));
+    /// let sorted: Vec<&[u8]> = cows.iter().collect();
+    /// assert_eq!(sorted, vec![&b"c"[..], b"bb", b"aaa"]);
+    /// # Ok::<(), stringtape::StringTapeError>(())
+    /// ```
+    pub fn sort_by<F>(&mut self, mut compare: F)
+    where
+        F: FnMut(&[u8], &[u8]) -> core::cmp::Ordering,
+    {
+        let data = &self.data;
+        self.entries
+            .sort_by(|first, second| compare(slice_at(data, *first), slice_at(data, *second)));
+    }
+
+    /// Sorts the slices in-place by a key extracted from each one.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::BytesCowsU32U16;
+    /// use std::borrow::Cow;
+    ///
+    /// let data = b"aaa bb c";
+    /// let mut cows = BytesCowsU32U16::from_iter_and_data(
+    ///     data.split(|&b| b == b' '),
+    ///     Cow::Borrowed(&data[..])
+    /// ).unwrap();
+    ///
+    /// cows.sort_by_key(|slice| slice.len());
+    /// let sorted: Vec<&[u8]> = cows.iter().collect();
+    /// assert_eq!(sorted, vec![&b"c"[..], b"bb", b"aaa"]);
+    /// # Ok::<(), stringtape::StringTapeError>(())
+    /// ```
+    pub fn sort_by_key<K, F>(&mut self, mut key_of: F)
+    where
+        F: FnMut(&[u8]) -> K,
+        K: Ord,
+    {
+        let data = &self.data;
+        self.entries
+            .sort_by_key(|entry| key_of(slice_at(data, *entry)));
+    }
+
+    /// Reorders the slices to match `order`, a permutation of `0..len()`.
+    ///
+    /// Pairs with an external solver: a SIMD argument sort such as
+    /// `stringzilla::sz::argsort_by` computes the order, and this applies it. Only the
+    /// compact entries move.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use stringtape::BytesCowsU32U16;
+    /// use std::borrow::Cow;
+    ///
+    /// let data = b"alpha beta gamma";
+    /// let mut cows = BytesCowsU32U16::from_iter_and_data(
+    ///     data.split(|&b| b == b' '),
+    ///     Cow::Borrowed(&data[..])
+    /// ).unwrap();
+    ///
+    /// cows.permute(&[2, 0, 1]).unwrap();
+    /// let reordered: Vec<&[u8]> = cows.iter().collect();
+    /// assert_eq!(reordered, vec![&b"gamma"[..], b"alpha", b"beta"]);
+    /// # Ok::<(), stringtape::StringTapeError>(())
+    /// ```
+    pub fn permute(&mut self, order: &[usize]) -> Result<(), StringTapeError> {
+        permute_entries(&mut self.entries, order)
+    }
+}
+
+/// Applies `order` to `entries`, rejecting anything that is not a permutation.
+///
+/// A repeated index would silently duplicate one slice and drop another, so the check is
+/// unconditional — its bitmap is smaller than the entry buffer already being allocated.
+fn permute_entries<Offset: OffsetType, Length: LengthType>(
+    entries: &mut Vec<PackedEntry<Offset, Length>>,
+    order: &[usize],
+) -> Result<(), StringTapeError> {
+    if order.len() != entries.len() {
+        return Err(StringTapeError::NotAPermutation);
+    }
+
+    let mut seen = Vec::new();
+    seen.resize(entries.len(), false);
+    for &index in order {
+        let slot = seen
+            .get_mut(index)
+            .ok_or(StringTapeError::NotAPermutation)?;
+        if *slot {
+            return Err(StringTapeError::NotAPermutation);
+        }
+        *slot = true;
+    }
+
+    let mut permuted = Vec::with_capacity(order.len());
+    for &index in order {
+        permuted.push(entries[index]);
+    }
+    *entries = permuted;
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -4741,9 +5179,81 @@ mod tests {
 
     #[test]
     fn capacity() {
-        let tape = CharsTapeI32::with_capacity(100, 10).unwrap();
+        let mut tape = CharsTapeI32::with_capacity(100, 10).unwrap();
         assert_eq!(tape.data_capacity(), 100);
-        assert_eq!(tape.capacity(), 0); // No strings added yet
+        // Capacity is what was requested, independent of how many strings are stored.
+        assert_eq!(tape.len(), 0);
+        assert!(tape.capacity() >= 10, "capacity was {}", tape.capacity());
+
+        let requested = tape.capacity();
+        tape.push("hello").unwrap();
+        assert_eq!(tape.len(), 1);
+        assert_eq!(tape.capacity(), requested);
+    }
+
+    #[test]
+    fn bytes_tape_exposes_mutable_data() {
+        let mut tape = BytesTapeU32::new();
+        tape.push(b"acgt").unwrap();
+        tape.push(b"tgca").unwrap();
+
+        for byte in tape.data_slice_mut() {
+            byte.make_ascii_uppercase();
+        }
+
+        assert_eq!(tape.get(0), Some(&b"ACGT"[..]));
+        assert_eq!(tape.get(1), Some(&b"TGCA"[..]));
+    }
+
+    #[test]
+    fn mutable_data_of_an_empty_tape_is_empty() {
+        let mut tape = BytesTapeU32::new();
+        assert!(tape.data_slice_mut().is_empty());
+    }
+
+    /// A cleared tape can be re-sized for the next batch, which was impossible while
+    /// `reserve` lived only on the private inner type.
+    #[test]
+    fn reserve_grows_a_cleared_tape() {
+        let mut tape = BytesTapeU32::new();
+        tape.push(b"small").unwrap();
+        tape.clear();
+
+        tape.reserve(4096, 64).unwrap();
+        let data_capacity = tape.data_capacity();
+        assert!(data_capacity >= 4096);
+
+        for _ in 0..64 {
+            tape.push(b"item").unwrap();
+        }
+        assert_eq!(tape.len(), 64);
+        assert_eq!(
+            tape.data_capacity(),
+            data_capacity,
+            "pushes within the reserved size should not reallocate"
+        );
+    }
+
+    #[test]
+    fn reserve_works_on_chars_tapes_too() {
+        let mut tape = CharsTape::<u32>::new();
+        tape.reserve(1024, 16).unwrap();
+        assert!(tape.data_capacity() >= 1024);
+        assert!(tape.capacity() >= 16);
+    }
+
+    /// Capacity must describe the allocation, not the number of stored items.
+    #[test]
+    fn capacity_reports_capacity_not_length() {
+        let mut tape = BytesTape::<u32>::with_capacity(128, 8).unwrap();
+        tape.push(b"one").unwrap();
+        assert_eq!(tape.len(), 1);
+        assert!(tape.capacity() >= 8, "capacity was {}", tape.capacity());
+
+        let mut chars = CharsTape::<u32>::with_capacity(128, 8).unwrap();
+        chars.push("one").unwrap();
+        assert_eq!(chars.len(), 1);
+        assert!(chars.capacity() >= 8, "capacity was {}", chars.capacity());
     }
 
     #[test]
@@ -5540,6 +6050,264 @@ mod tests {
         assert!(matches!(s2, CharsCowsAuto::U32U16(_)));
         assert_eq!(s2.bytes_per_entry(), 6);
     }
+
+    // region: Range indexing
+
+    /// Range indexing must return the bytes of the requested items, not the whole tape.
+    #[test]
+    fn range_indexing_spans_only_the_requested_items() {
+        let mut tape = BytesTapeU32::new();
+        tape.extend([&b"alpha"[..], b"beta", b"gamma"]).unwrap();
+
+        let view = tape.view();
+        assert_eq!(&view[1..3], b"betagamma");
+        assert_eq!(&view[0..1], b"alpha");
+        assert_eq!(&view[..2], b"alphabeta");
+        assert_eq!(&view[1..], b"betagamma");
+        assert_eq!(&view[1..=2], b"betagamma");
+        assert_eq!(&view[..=1], b"alphabeta");
+        assert_eq!(&view[..], b"alphabetagamma");
+    }
+
+    /// The same spans are reachable straight off the tape, without going through a view.
+    #[test]
+    fn range_indexing_works_on_the_tape_itself() {
+        let mut tape = BytesTapeU32::new();
+        tape.extend([&b"alpha"[..], b"beta", b"gamma"]).unwrap();
+        assert_eq!(&tape[1..3], b"betagamma");
+        assert_eq!(&tape[..], b"alphabetagamma");
+    }
+
+    /// Item boundaries are character boundaries, so a Chars range yields `&str`.
+    #[test]
+    fn range_indexing_of_chars_yields_text() {
+        let mut tape = CharsTapeU32::new();
+        tape.extend(["alpha", "béta", "gamma"]).unwrap();
+        assert_eq!(&tape[1..3], "bétagamma");
+        assert_eq!(&tape.view()[0..2], "alphabéta");
+        assert_eq!(&tape[..], "alphabétagamma");
+    }
+
+    #[test]
+    fn range_indexing_of_an_empty_view_is_empty() {
+        let tape = BytesTapeU32::new();
+        assert!(tape.view()[..].is_empty());
+        assert!(tape[..].is_empty());
+    }
+
+    // endregion: Range indexing
+
+    // region: BytesCows ordering
+
+    fn bytes_cows(data: &[u8]) -> BytesCows<'_, u32, u16> {
+        BytesCows::from_iter_and_data(data.split(|&byte| byte == b' '), Cow::Borrowed(data))
+            .unwrap()
+    }
+
+    fn collect<'a>(cows: &'a BytesCows<'a, u32, u16>) -> Vec<&'a [u8]> {
+        cows.iter().collect()
+    }
+
+    #[test]
+    fn bytes_cows_sorts_lexicographically() {
+        let data = b"zebra apple banana";
+        let mut cows = bytes_cows(data);
+        cows.sort();
+        assert_eq!(collect(&cows), vec![&b"apple"[..], b"banana", b"zebra"]);
+    }
+
+    #[test]
+    fn bytes_cows_sorts_unstably() {
+        let data = b"zebra apple banana";
+        let mut cows = bytes_cows(data);
+        cows.sort_unstable();
+        assert_eq!(collect(&cows), vec![&b"apple"[..], b"banana", b"zebra"]);
+    }
+
+    #[test]
+    fn bytes_cows_sorts_with_comparator() {
+        let data = b"aaa bb c";
+        let mut cows = bytes_cows(data);
+        cows.sort_by(|first, second| first.len().cmp(&second.len()));
+        assert_eq!(collect(&cows), vec![&b"c"[..], b"bb", b"aaa"]);
+    }
+
+    #[test]
+    fn bytes_cows_sorts_by_key() {
+        let data = b"aaa bb c";
+        let mut cows = bytes_cows(data);
+        cows.sort_by_key(|slice| slice.len());
+        assert_eq!(collect(&cows), vec![&b"c"[..], b"bb", b"aaa"]);
+    }
+
+    /// Ordering must handle non-UTF-8 payloads, which is why `BytesCows` exists
+    /// separately from `CharsCows`.
+    #[test]
+    fn bytes_cows_sorts_arbitrary_bytes() {
+        let data = &[0xFFu8, 0x00, b' ', 0x01, 0x02][..];
+        let mut cows = BytesCows::<u32, u16>::from_iter_and_data(
+            data.split(|&byte| byte == b' '),
+            Cow::Borrowed(data),
+        )
+        .unwrap();
+        cows.sort();
+        assert_eq!(collect(&cows), vec![&[0x01u8, 0x02][..], &[0xFF, 0x00][..]]);
+    }
+
+    // endregion: BytesCows ordering
+
+    // region: Cows construction
+
+    #[test]
+    fn chars_cows_builds_from_offsets() {
+        let data = "alphabetagamma";
+        let cows = CharsCows::<u32, u16>::from_offsets_and_data(
+            [(0, 5), (5, 4), (9, 5)],
+            Cow::Borrowed(data.as_bytes()),
+        )
+        .unwrap();
+        assert_eq!(
+            cows.iter().collect::<Vec<&str>>(),
+            vec!["alpha", "beta", "gamma"]
+        );
+    }
+
+    /// Unlike the byte constructor, the string one must reject spans that split a
+    /// character, since every accessor assumes validated UTF-8.
+    #[test]
+    fn chars_cows_from_offsets_rejects_split_characters() {
+        let data = "béta";
+        assert!(matches!(
+            CharsCows::<u32, u16>::from_offsets_and_data([(1, 1)], Cow::Borrowed(data.as_bytes())),
+            Err(StringTapeError::Utf8Error(_))
+        ));
+    }
+
+    #[test]
+    fn cows_from_offsets_rejects_spans_past_the_buffer() {
+        let data = "alpha";
+        assert!(matches!(
+            CharsCows::<u32, u16>::from_offsets_and_data([(0, 99)], Cow::Borrowed(data.as_bytes())),
+            Err(StringTapeError::IndexOutOfBounds)
+        ));
+        assert!(matches!(
+            BytesCows::<u32, u16>::from_offsets_and_data([(0, 99)], Cow::Borrowed(data.as_bytes())),
+            Err(StringTapeError::IndexOutOfBounds)
+        ));
+    }
+
+    /// Owned items must work, which is why the shared builder wraps rather than maps.
+    #[test]
+    fn chars_cows_builds_from_owned_strings() {
+        let data = "alpha beta";
+        let owned: Vec<String> = data.split(' ').map(String::from).collect();
+        // Owned copies do not point into `data`, so the pointer check must reject them.
+        assert!(CharsCows::<u32, u16>::from_iter_and_data(
+            owned.iter(),
+            Cow::Borrowed(data.as_bytes())
+        )
+        .is_err());
+
+        let borrowed: Vec<&str> = data.split(' ').collect();
+        let cows =
+            CharsCows::<u32, u16>::from_iter_and_data(borrowed, Cow::Borrowed(data.as_bytes()))
+                .unwrap();
+        assert_eq!(cows.iter().collect::<Vec<&str>>(), vec!["alpha", "beta"]);
+    }
+
+    // endregion: Cows construction
+
+    // region: Permutation
+
+    #[test]
+    fn bytes_cows_permutes() {
+        let data = b"alpha beta gamma";
+        let mut cows = bytes_cows(data);
+        cows.permute(&[2, 0, 1]).unwrap();
+        assert_eq!(collect(&cows), vec![&b"gamma"[..], b"alpha", b"beta"]);
+    }
+
+    #[test]
+    fn chars_cows_permutes() {
+        let data = "alpha beta gamma";
+        let mut cows = CharsCows::<u32, u8>::from_iter_and_data(
+            data.split_whitespace(),
+            Cow::Borrowed(data.as_bytes()),
+        )
+        .unwrap();
+        cows.permute(&[2, 0, 1]).unwrap();
+        assert_eq!(
+            cows.iter().collect::<Vec<&str>>(),
+            vec!["gamma", "alpha", "beta"]
+        );
+    }
+
+    #[test]
+    fn permute_identity_is_a_no_op() {
+        let data = b"alpha beta gamma";
+        let mut cows = bytes_cows(data);
+        cows.permute(&[0, 1, 2]).unwrap();
+        assert_eq!(collect(&cows), vec![&b"alpha"[..], b"beta", b"gamma"]);
+    }
+
+    #[test]
+    fn permute_rejects_a_wrong_length_order() {
+        let data = b"alpha beta gamma";
+        let mut cows = bytes_cows(data);
+        assert!(matches!(
+            cows.permute(&[0, 1]),
+            Err(StringTapeError::NotAPermutation)
+        ));
+    }
+
+    #[test]
+    fn permute_rejects_an_out_of_range_index() {
+        let data = b"alpha beta gamma";
+        let mut cows = bytes_cows(data);
+        assert!(matches!(
+            cows.permute(&[0, 1, 7]),
+            Err(StringTapeError::NotAPermutation)
+        ));
+    }
+
+    /// Repeats duplicate one slice and drop another, so they are rejected in every build.
+    #[test]
+    fn permute_rejects_repeats() {
+        let data = b"alpha beta gamma";
+        let mut cows = bytes_cows(data);
+        assert!(matches!(
+            cows.permute(&[0, 0, 1]),
+            Err(StringTapeError::NotAPermutation)
+        ));
+    }
+
+    /// The intended pairing: an external solver produces the order, `permute` applies it,
+    /// and the result matches an in-place sort.
+    #[test]
+    fn permute_applies_an_externally_computed_order() {
+        let data = b"delta alpha charlie bravo";
+        let mut sorted_in_place = bytes_cows(data);
+        sorted_in_place.sort();
+
+        let mut permuted = bytes_cows(data);
+        let mut order: Vec<usize> = (0..permuted.len()).collect();
+        order.sort_by_key(|&index| permuted.get(index).unwrap().to_vec());
+        permuted.permute(&order).unwrap();
+
+        assert_eq!(collect(&permuted), collect(&sorted_in_place));
+    }
+
+    /// Payload bytes must not move — only the entries do.
+    #[test]
+    fn permute_leaves_the_payload_untouched() {
+        let data = b"alpha beta gamma";
+        let mut cows = bytes_cows(data);
+        let before = cows.data().to_vec();
+        cows.permute(&[2, 1, 0]).unwrap();
+        assert_eq!(cows.data(), &before[..]);
+    }
+
+    // endregion: Permutation
 }
 
 // ========================

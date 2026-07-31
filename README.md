@@ -38,7 +38,7 @@ On GPU-equipped servers, data should be transferred to GPU memory in large chunk
 With individual `String` instances scattered around the heap, this is impossible.
 With tapes and cows, this is easy, just don't forget to use custom allocators, like:
 
-- the NUMA-aware `PinnedAllocator` from [Fork Union](https://github.com/ashvardanian/fork_union/),
+- the NUMA-aware `PinnedAllocator` from [ForkUnion](https://github.com/ashvardanian/ForkUnion),
 - the GPU-friendly `UnifiedAlloc` from [StringZilla](https://github.com/ashvardanian/StringZilla),
 - or any other allocator implementing the [allocator_api2](https://crates.io/crates/allocator_api2) traits.
 
@@ -140,7 +140,7 @@ tape.shrink_to_fit()?;                  // Reduce memory usage
 let view = tape.view();              // View entire tape
 let subview = tape.subview(1, 3)?;   // Items [1, 3)
 let nested = subview.subview(0, 1)?; // Nested subviews
-let raw_bytes = &tape.view()[1..3];  // Raw byte slice
+let spanned = &tape[1..3];           // Text of items [1, 3) in one slice
 
 // Views have same API as tapes
 assert_eq!(subview.len(), 2);
