@@ -83,9 +83,9 @@
 #[cfg(feature = "std")]
 extern crate std;
 
-#[cfg(not(feature = "std"))]
 extern crate alloc;
 
+use core::alloc::{Allocator, Layout};
 use core::cmp::Ordering;
 use core::fmt;
 use core::hash::{Hash, Hasher};
@@ -107,7 +107,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::borrow::Cow;
 
-use allocator_api2::alloc::{Allocator, Global, Layout};
+use alloc::alloc::Global;
 
 /// Errors that can occur when working with tape classes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -440,7 +440,7 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
     ///
     /// ```rust
     /// use stringtape::CharsTape;
-    /// use allocator_api2::alloc::Global;
+    /// use std::alloc::Global;
     ///
     /// let tape: CharsTape<i32, Global> = CharsTape::new_in(Global);
     /// assert!(tape.is_empty());
@@ -496,7 +496,7 @@ impl<Offset: OffsetType, A: Allocator> RawTape<Offset, A> {
     ///
     /// ```rust
     /// use stringtape::{CharsTape, StringTapeError};
-    /// use allocator_api2::alloc::Global;
+    /// use std::alloc::Global;
     ///
     /// let tape: CharsTape<i32, Global> = CharsTape::with_capacity_in(1024, 100, Global)?;
     /// assert_eq!(tape.data_capacity(), 1024);

@@ -2,6 +2,7 @@
 name = "stringtape"
 version = "2.5.0"
 edition = "2021"
+rust-version = "1.100" # `core::alloc::Allocator` and `alloc::alloc::Global` stabilized here
 authors = ["Ash Vardanian <1983160+ashvardanian@users.noreply.github.com>"]
 description = "A tape class for strings arrays compatible with Apache Arrow"
 license = "Apache-2.0"
@@ -16,17 +17,12 @@ exclude = [".github/", ".vscode/"]
 [lib]
 path = "stringtape.rs"
 
-[dependencies]
-allocator-api2 = { version = "0.4.0", default-features = false, features = [
-    "alloc",
-] }
-
 [dev-dependencies]
 arrow = { version = "59.1.0", default-features = false }
 
 [features]
 default = ["std"]
-std = ["allocator-api2/std"]
+std = []
 
 [[bin]]
 name = "bench_vec_string"

@@ -40,7 +40,7 @@ With tapes and cows, this is easy, just don't forget to use custom allocators, l
 
 - the NUMA-aware `PinnedAllocator` from [ForkUnion](https://github.com/ashvardanian/ForkUnion),
 - the GPU-friendly `UnifiedAlloc` from [StringZilla](https://github.com/ashvardanian/StringZilla),
-- or any other allocator implementing the [allocator_api2](https://crates.io/crates/allocator_api2) traits.
+- or any other allocator implementing [`core::alloc::Allocator`](https://doc.rust-lang.org/core/alloc/trait.Allocator.html).
 
 ## Quick Start
 
@@ -194,7 +194,7 @@ tape.clear();               // Remove all items
 tape.reserve(4096, 64)?;    // Size up for the next batch in one step
 
 // Custom allocators
-use allocator_api2::alloc::Global;
+use std::alloc::Global;
 let in_global: CharsTapeI32 = CharsTape::new_in(Global);
 # Ok::<(), StringTapeError>(())
 ```
