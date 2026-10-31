@@ -7,7 +7,7 @@ Memory-efficient collection classes for variable-length strings, co-located on c
 - Convertible to __[Apache Arrow](https://arrow.apache.org/)__ `String`/`LargeString` & `Binary`/`LargeBinary` arrays
 - Compatible with __UTF-8 & binary__ strings in Rust via `CharsTape` and `BytesTape`
 - Usable in `no_std` and with custom __allocators__ for GPU & embedded use cases
-- Sliceable into __zero-copy__ borrow-checked views with `[i..n]` range syntax
+- Sliceable into __zero-copy__ borrow-checked views with `subview(i..n)`
 
 __Why not use `Vec<String>`?__
 The first reason is about __RAM__!
@@ -20,7 +20,7 @@ let words = doc.split_whitespace();             // ~ 160 M words
 let buffers = words.map(str::as_bytes);
 
 let _ = Vec::<String>::from_iter(words);        // + 7.1 GB copied ❌
-let _ = CharsTapeAuto::from_iter(words);        // + 1.3 GB copied ✅
+CharsTapeAuto::new().extend(words)?;            // + 1.3 GB copied ✅
 let _ = Vec::<&[u8]>::from_iter(buffers);       // + 1.9 GB copy-less ⚠️
 let _ = BytesCowsAuto::from_iter_and_data(      // + 0.7 GB copy-less ✅
     buffers,
@@ -36,11 +36,7 @@ When designing high-performance systems, memory affinity is crucial.
 On 2-socket servers, developers should avoid accessing memory allocated on the other socket.
 On GPU-equipped servers, data should be transferred to GPU memory in large chunks to hide PCIe and software latency.
 With individual `String` instances scattered around the heap, this is impossible.
-With tapes and cows, this is easy, just don't forget to use custom allocators, like:
-
-- the NUMA-aware `PinnedAllocator` from [ForkUnion](https://github.com/ashvardanian/ForkUnion),
-- the GPU-friendly `UnifiedAlloc` from [StringZilla](https://github.com/ashvardanian/StringZilla),
-- or any other allocator implementing [`core::alloc::Allocator`](https://doc.rust-lang.org/core/alloc/trait.Allocator.html).
+With tapes and cows, this is easy: pass any allocator implementing [`core::alloc::Allocator`](https://doc.rust-lang.org/core/alloc/trait.Allocator.html).
 
 ## Quick Start
 
@@ -54,16 +50,17 @@ tape.push("hello")?;
 tape.push("world")?;
 
 assert_eq!(tape.len(), 2);
-assert_eq!(&tape[0], "hello");
 assert_eq!(tape.get(1), Some("world"));
+assert_eq!(tape.get(2), None);
 
 // Iterate over strings
 for s in &tape {
     println!("{}", s);
 }
 
-// Build from iterator with auto type selection
-let tape2 = CharsTapeAuto::from_iter(["a", "b", "c"].iter().copied());
+// Append many strings; the offsets widen as the data grows
+let mut tape2 = CharsTapeAuto::new();
+tape2.extend(["a", "b", "c"])?;
 assert_eq!(tape2.len(), 3);
 
 // Zero-copy slices referencing existing data
@@ -107,8 +104,7 @@ use stringtape::{CharsTapeI32, StringTapeError};
 let mut tape = CharsTapeI32::new();
 tape.push("hello")?;                    // Append one string
 tape.extend(["world", "foo"])?;         // Append an array
-assert_eq!(&tape[0], "hello");          // Direct indexing
-assert_eq!(tape.get(1), Some("world")); // Safe access
+assert_eq!(tape.get(1), Some("world")); // Access by index
 assert!(tape.contains("hello"));        // Membership test
 
 for s in &tape {                        // Forward iteration
@@ -118,8 +114,9 @@ for s in tape.iter().rev() {            // Reverse iteration
     println!("{}", s);
 }
 
-// Construct from iterator
-let tape2: CharsTapeI32 = ["a", "b", "c"].into_iter().collect();
+// Construct from any iterator
+let mut tape2 = CharsTapeI32::new();
+tape2.extend(["a", "b", "c"])?;
 
 // Compare in-place
 assert!(tape > tape2);                  // Lexicographic comparison, "hello" > "a"
@@ -127,7 +124,7 @@ assert!(tape > tape2);                  // Lexicographic comparison, "hello" > "
 // Utility methods
 tape.first();                           // First element
 tape.last();                            // Last element
-tape.pop();                             // Remove last
+assert_eq!(tape.pop(), Some("foo"));    // Remove and return the last
 tape.shrink_to_fit()?;                  // Reduce memory usage
 # Ok::<(), StringTapeError>(())
 ```
@@ -144,7 +141,7 @@ use stringtape::{CharsTapeI32, CharsCows, Reorderable, StringTapeError};
 let mut tape = CharsTapeI32::new();
 tape.extend(["zebra", "apple", "banana"])?;
 
-let mut cows: CharsCows<i32, u16> = tape.as_reorderable()?;
+let mut cows = CharsCows::<i32, u16>::try_from(&tape)?;
 cows.sort();
 cows.sort_by(|first, second| first.len().cmp(&second.len()));
 
@@ -163,16 +160,17 @@ use stringtape::{CharsTapeI32, StringTapeError};
 let mut tape = CharsTapeI32::new();
 tape.extend(["hello", "world", "foo"])?;
 
-let view = tape.view();              // View entire tape
-let subview = tape.subview(1, 3)?;   // Items [1, 3)
-let nested = subview.subview(0, 1)?; // Nested subviews
-let spanned = &tape[1..3];           // Text of items [1, 3) in one slice
-
-// Views have same API as tapes
-assert_eq!(subview.len(), 2);
-assert_eq!(&subview[0], "world");
-assert_eq!(nested.len(), 1);
+let spanned = &tape[1..3];                      // Text of items [1, 3) in one slice
 assert_eq!(spanned, "worldfoo");
+
+let view = tape.view();                         // View entire tape; views are `Copy`
+assert!(view.subview(2..9).is_none());          // Checked slicing: out of range is `None`
+
+if let Some(subview) = view.subview(1..) {      // Items [1, 3); also `1..3`, `..=2`, `..`
+    assert_eq!(subview.len(), 2);               // Views have same API as tapes
+    assert_eq!(subview.get(0), Some("world"));
+    assert_eq!(&subview[..], "worldfoo");       // Ranges index views too
+}
 # Ok::<(), StringTapeError>(())
 ```
 
@@ -205,10 +203,9 @@ True zero-copy conversion to/from Arrow arrays:
 
 ```rust,ignore
 // CharsTape → Arrow (zero-copy)
-let (data_slice, offsets_slice) = tape.arrow_slices();
-let data_buffer = Buffer::from_slice_ref(data_slice);
+let data_buffer = Buffer::from_slice_ref(tape.data());
 let offsets_buffer = OffsetBuffer::new(ScalarBuffer::new(
-    Buffer::from_slice_ref(offsets_slice), 0, offsets_slice.len()
+    Buffer::from_slice_ref(tape.offsets()), 0, tape.offsets().len()
 ));
 let arrow_array = StringArray::new(offsets_buffer, data_buffer, None);
 
@@ -234,8 +231,9 @@ use std::borrow::Cow;
 let data = "hello world";
 let strings = data.split_whitespace();
 
-// CharsTapeAuto: selects I32/U32/U64 offset based on total data size
-let tape = CharsTapeAuto::from_iter(strings.clone());
+// CharsTapeAuto: starts with I32 offsets, widening to U32 and U64 as data grows
+let mut tape = CharsTapeAuto::new();
+tape.extend(strings.clone())?;
 assert_eq!(tape.type_name(), "CharsTape<i32>");
 
 // CharsCowsAuto: selects offset (U32/U64) and length (U8/U16/U32) types
@@ -253,7 +251,8 @@ These cannot be converted to/from Arrow arrays.
 
 ### Standard Traits
 
-All tape and view types implement standard Rust traits: `Debug`, `Clone`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Hash`, `Default`, `FromIterator`, `Extend`, `IntoIterator`, `Iterator`, `ExactSizeIterator`, `DoubleEndedIterator`, `Send`, `Sync`.
+Tapes, views and cows implement `Debug`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Hash`, `IntoIterator`, `Send` and `Sync`.
+Tapes also implement `Default`, views are `Clone` and `Copy`, and every iterator is an `ExactSizeIterator` and a `DoubleEndedIterator`.
 
 ```rust
 use stringtape::{CharsTapeI32, StringTapeError};
@@ -262,7 +261,8 @@ use std::collections::HashMap;
 let mut tape1 = CharsTapeI32::new();
 tape1.push("hello")?;
 
-let mut tape2 = tape1.clone();          // Clone
+let mut tape2 = CharsTapeI32::new();    // Copy explicitly, as copies can fail
+tape2.extend(&tape1)?;
 assert_eq!(tape1, tape2);               // PartialEq, Eq
 assert!(tape1 <= tape2);                // PartialOrd, Ord
 
@@ -277,32 +277,46 @@ for s in tape2.iter().rev() {           // DoubleEndedIterator
 # Ok::<(), StringTapeError>(())
 ```
 
+## Error Handling
+
+No method panics, aborts on allocation failure, or silently drops an item.
+Range indexing is the one exception and follows `str`: `&tape[1..3]` panics on an inverted or out-of-bounds range, while `subview` returns `None`.
+Tapes and cows implement neither `FromIterator`, `Extend` nor `Clone`, because those signatures can't report a failure.
+A read that can miss returns `Option`, so `get` past the end or `subview` outside the tape is `None`.
+Anything that allocates, validates UTF-8, or narrows a size into the `Offset` or `Length` type returns `Result<_, StringTapeError>`, and the variant says which of those failed.
+A refused `push` leaves the tape unchanged, and a refused `extend` keeps the items before the one that failed.
+`pop` returns the string it removed rather than a success flag.
+Two exceptions remain:
+
+- The stable `sort_by` and `sort_by_key` on cows use the standard library's stable sort, whose scratch buffer aborts if it cannot be allocated; `sort` is unstable, in place and allocation-free.
+- `StringTapeError` implements `Display`, so the standard `to_string` aborts if the global heap is exhausted.
+
 ## `no_std` Support
 
 StringTape can be used in `no_std` environments:
 
 ```toml
 [dependencies]
-stringtape = { version = "2", default-features = false }
+stringtape = { version = "3", default-features = false }
 ```
 
 In `no_std` mode:
 
 - All functionality is preserved
 - Requires `alloc` for dynamic allocation
-- Error types implement `Display` but not `std::error::Error`
+- `StringTapeError` still implements `core::error::Error`
 
 ## Testing
 
-Run tests for both `std` and `no_std` configurations:
+Run tests for both `std` and `no_std` configurations, on a nightly toolchain until Rust 1.100 is stable:
 
 ```bash
-cargo test                          # Test with std (default)
-cargo test --doc                    # Test documentation examples
-cargo test --no-default-features    # Test without std
-cargo test --all-features           # Test with all features enabled
-cargo clippy --lib -- -D warnings   # Lint the library code
-cargo fmt --all -- --check          # Check code formatting
+cargo test                                                              # Test with std, README included
+cargo test --no-default-features                                        # Test without std
+cargo build --lib --no-default-features --target thumbv7em-none-eabihf  # Build for bare metal
+cargo miri test --lib                                                   # Check unsafe code under Miri
+cargo clippy --all-targets -- -D warnings                               # Lint every target
+cargo fmt --check                                                       # Check code formatting
 ```
 
 To reproduce memory usage numbers mentioned above, pull the dataset for the ["Large Text Compression Benchmark"](https://mattmahoney.net/dc/textdata.html), and run:

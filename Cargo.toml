@@ -9,7 +9,6 @@ license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/ashvardanian/StringTape"
 documentation = "https://docs.rs/stringtape"
-homepage = "https://github.com/ashvardanian/StringTape"
 keywords = ["arrow", "strings", "no-std", "tape", "storage"]
 categories = ["data-structures", "no-std"]
 exclude = [".github/", ".vscode/"]

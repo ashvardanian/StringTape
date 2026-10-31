@@ -23,19 +23,40 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+      # Rust 1.100 stabilizes `core::alloc::Allocator` on 2026-11-12; switch to `@stable` then
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy, rustfmt
+          targets: thumbv7em-none-eabihf
+      - name: Check formatting
+        run: cargo fmt --check
       - name: Test `std`
-        run: cargo test
+        run: cargo test --locked
       - name: Test `no_std`
-        run: cargo test --no-default-features
-      - name: Test docs
-        run: cargo test --doc
+        run: cargo test --locked --no-default-features
+      - name: Build for a bare-metal target
+        run: cargo build --locked --lib --no-default-features --target thumbv7em-none-eabihf
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  miri:
+    name: Test under Miri
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      - name: Test under Miri
+        run: cargo miri test --locked --lib
 
   publish_rust:
     name: Publish to crates.io
     runs-on: ubuntu-26.04
-    needs: [hooks, test]
+    needs: [hooks, test, miri]
     environment: crates-io
     permissions:
       id-token: write
@@ -43,7 +64,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
       - name: Authenticate with crates.io
         id: crates_io
         uses: rust-lang/crates-io-auth-action@v1
