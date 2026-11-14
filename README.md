@@ -308,13 +308,13 @@ In `no_std` mode:
 
 ## Testing
 
-Run tests for both `std` and `no_std` configurations, on a nightly toolchain until Rust 1.100 is stable:
+Run tests for both `std` and `no_std` configurations on Rust 1.100 or newer:
 
 ```bash
 cargo test                                                              # Test with std, README included
 cargo test --no-default-features                                        # Test without std
 cargo build --lib --no-default-features --target thumbv7em-none-eabihf  # Build for bare metal
-cargo miri test --lib                                                   # Check unsafe code under Miri
+cargo +nightly miri test --lib                                          # Check unsafe code under Miri
 cargo clippy --all-targets -- -D warnings                               # Lint every target
 cargo fmt --check                                                       # Check code formatting
 ```
